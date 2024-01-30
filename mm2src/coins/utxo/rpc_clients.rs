@@ -1513,7 +1513,7 @@ fn spawn_electrum(
         config,
         spawner,
         event_sender,
-        scripthash_notification_sender
+        scripthash_notification_sender,
     ))
 }
 
@@ -1564,7 +1564,7 @@ fn spawn_electrum(
         config,
         spawner,
         event_sender,
-        scripthash_notification_sender
+        scripthash_notification_sender,
     ))
 }
 
@@ -1696,7 +1696,7 @@ async fn electrum_request_multi(
             )
             .map(|response| (JsonRpcRemoteAddr(connection_addr), response));
             futures.push(fut)
-        }
+        };
     }
     drop(connections);
 
@@ -1879,6 +1879,7 @@ impl ElectrumClient {
         event_handlers: Vec<RpcTransportEventHandlerShared>,
         block_headers_storage: BlockHeaderStorage,
         abortable_system: AbortableQueue,
+        scripthash_notification_sender: ScripthashNotificationSender,
     ) -> Result<ElectrumClient, String> {
         let spawner = abortable_system.weak_spawner();
         let (sender, receiver) = futures::channel::mpsc::unbounded::<ElectrumClientEvent>();
@@ -1888,6 +1889,7 @@ impl ElectrumClient {
                 block_headers_storage,
                 abortable_system,
                 sender,
+                scripthash_notification_sender,
             )?),
         };
         spawner.spawn(client.clone().ping_loop());
@@ -2611,11 +2613,13 @@ impl ElectrumClientImpl {
                 servers,
                 conn_mng_abortable_system,
                 event_sender,
+                scripthash_notification_sender.clone(),
             )?))),
             ConnMngPolicy::Multiple => Arc::new(ConnMngMultiple(Arc::new(ConnMngMultipleImpl::new(
                 servers,
                 conn_mng_abortable_system,
                 event_sender,
+                scripthash_notification_sender.clone(),
             )))),
         };
         let protocol_version = OrdRange::new(1.2, 1.4).unwrap();
@@ -2631,9 +2635,8 @@ impl ElectrumClientImpl {
             block_headers_storage,
             negotiate_version: client_settings.negotiate_version,
             abortable_system,
-            negotiate_version,
             scripthash_notification_sender,
-        }
+        })
     }
 
     #[cfg(test)]
@@ -2647,8 +2650,14 @@ impl ElectrumClientImpl {
     ) -> ElectrumClientImpl {
         ElectrumClientImpl {
             protocol_version,
-            ..ElectrumClientImpl::try_new(client_settings, block_headers_storage, abortable_system, event_sender,  scripthash_notification_sender,)
-                .expect("Expected electrum_client_impl constructed without a problem")
+            ..ElectrumClientImpl::try_new(
+                client_settings,
+                block_headers_storage,
+                abortable_system,
+                event_sender,
+                scripthash_notification_sender,
+            )
+            .expect("Expected electrum_client_impl constructed without a problem")
         }
     }
 }
@@ -2867,6 +2876,7 @@ macro_rules! handle_connect_err {
     };
 }
 
+#[allow(clippy::too_many_arguments)]
 #[cfg(not(target_arch = "wasm32"))]
 async fn connect_impl<Spawner: SpawnFuture>(
     config: ElectrumConfig,

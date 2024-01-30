@@ -5,6 +5,7 @@ use futures::{select, FutureExt};
 use std::ops::Deref;
 use std::sync::Arc;
 
+use crate::utxo::ScripthashNotificationSender;
 use common::executor::abortable_queue::{AbortableQueue, WeakSpawner};
 use common::executor::{AbortableSystem, SpawnFuture, Timer};
 use common::log::{debug, error, info, warn};
@@ -21,6 +22,7 @@ pub struct ConnMngMultipleImpl {
     guarded: AsyncMutex<ConnMngMultipleState>,
     abortable_system: AbortableQueue,
     event_sender: futures::channel::mpsc::UnboundedSender<ElectrumClientEvent>,
+    scripthash_notification_sender: ScripthashNotificationSender,
 }
 
 #[derive(Debug)]
@@ -230,8 +232,12 @@ impl ConnMngMultiple {
         conn_settings: ElectrumConnSettings,
         weak_spawner: WeakSpawner,
     ) -> Result<(), ConnMngError> {
-        let (conn, mut conn_ready_receiver) =
-            spawn_electrum(&conn_settings, weak_spawner.clone(), self.0.event_sender.clone())?;
+        let (conn, mut conn_ready_receiver) = spawn_electrum(
+            &conn_settings,
+            weak_spawner.clone(),
+            self.0.event_sender.clone(),
+            &self.0.scripthash_notification_sender,
+        )?;
         Self::register_connection(&mut self.0.guarded.lock().await, conn)?;
         let timeout_sec = conn_settings.timeout_sec.unwrap_or(DEFAULT_CONN_TIMEOUT_SEC);
         let address = conn_settings.url.clone();
@@ -262,6 +268,7 @@ impl ConnMngMultipleImpl {
         servers: Vec<ElectrumConnSettings>,
         abortable_system: AbortableQueue,
         event_sender: futures::channel::mpsc::UnboundedSender<ElectrumClientEvent>,
+        scripthash_notification_sender: ScripthashNotificationSender,
     ) -> ConnMngMultipleImpl {
         let mut connections: Vec<ElectrumConnCtx> = vec![];
         for conn_settings in servers {
@@ -279,6 +286,7 @@ impl ConnMngMultipleImpl {
             abortable_system,
             event_sender,
             guarded: AsyncMutex::new(ConnMngMultipleState { conn_ctxs: connections }),
+            scripthash_notification_sender,
         }
     }
 

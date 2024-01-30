@@ -18,7 +18,7 @@ use common::now_sec;
 use crypto::{Bip32DerPathError, CryptoCtx, CryptoCtxError, GlobalHDAccountArc, HwWalletType, StandardHDPathError,
              StandardHDPathToCoin};
 use derive_more::Display;
-use futures::channel::mpsc::{channel, unbounded, Receiver as AsyncReceiver, UnboundedSender};
+use futures::channel::mpsc::{channel, Receiver as AsyncReceiver, UnboundedReceiver, UnboundedSender};
 use futures::compat::Future01CompatExt;
 use futures::lock::Mutex as AsyncMutex;
 use keys::bytes::Bytes;
@@ -573,8 +573,14 @@ pub trait UtxoCoinBuilderCommonOps {
             negotiate_version: args.negotiate_version,
             conn_mng_policy: ctx.electrum_conn_mng_policy(),
         };
-        let client = ElectrumClient::try_new(client_settings, event_handlers, block_headers_storage, abortable_system)
-            .map_to_mm(UtxoCoinBuildError::Internal)?;
+        let client = ElectrumClient::try_new(
+            client_settings,
+            event_handlers,
+            block_headers_storage,
+            abortable_system,
+            scripthash_notification_sender,
+        )
+        .map_to_mm(UtxoCoinBuildError::Internal)?;
 
         client.connect().await.map_to_mm(UtxoCoinBuildError::Internal)?;
 

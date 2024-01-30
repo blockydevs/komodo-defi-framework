@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::utxo::ScripthashNotificationSender;
 use common::executor::abortable_queue::{AbortableQueue, WeakSpawner};
 use common::executor::{AbortableSystem, SpawnFuture, Timer};
 use common::log::{debug, error, info, warn};
@@ -20,6 +21,7 @@ pub struct ConnMngSelectiveImpl {
     guarded: AsyncMutex<ConnMngSelectiveState>,
     abortable_system: AbortableQueue,
     event_sender: futures::channel::mpsc::UnboundedSender<ElectrumClientEvent>,
+    scripthash_notification_sender: ScripthashNotificationSender,
 }
 
 #[derive(Debug)]
@@ -65,7 +67,12 @@ impl ConnMngTrait for ConnMngSelective {
             debug!("Got conn_settings to connect to: {:?}", conn_settings);
             let address = conn_settings.url.clone();
             match self
-                .connect_to(conn_settings, weak_spawner, self.0.event_sender.clone())
+                .connect_to(
+                    conn_settings,
+                    weak_spawner,
+                    self.0.event_sender.clone(),
+                    &self.0.scripthash_notification_sender,
+                )
                 .await
             {
                 Ok(_) => {
@@ -209,7 +216,12 @@ impl ConnMngSelective {
                 drop(guard);
                 if let Err(err) = self
                     .clone()
-                    .connect_to(conn_settings, conn_spawner, self.0.event_sender.clone())
+                    .connect_to(
+                        conn_settings,
+                        conn_spawner,
+                        self.0.event_sender.clone(),
+                        &self.0.scripthash_notification_sender,
+                    )
                     .await
                 {
                     error!("Failed to resume: {}", err);
@@ -299,8 +311,14 @@ impl ConnMngSelective {
         conn_settings: ElectrumConnSettings,
         weak_spawner: WeakSpawner,
         event_sender: futures::channel::mpsc::UnboundedSender<ElectrumClientEvent>,
+        scripthash_notification_sender: &ScripthashNotificationSender,
     ) -> Result<(), ConnMngError> {
-        let (conn, mut conn_ready_receiver) = spawn_electrum(&conn_settings, weak_spawner.clone(), event_sender)?;
+        let (conn, mut conn_ready_receiver) = spawn_electrum(
+            &conn_settings,
+            weak_spawner.clone(),
+            event_sender,
+            scripthash_notification_sender,
+        )?;
         Self::register_connection(&mut self.0.guarded.lock().await, conn)?;
         let timeout_sec = conn_settings.timeout_sec.unwrap_or(DEFAULT_CONN_TIMEOUT_SEC);
 
@@ -339,6 +357,7 @@ impl ConnMngSelectiveImpl {
         servers: Vec<ElectrumConnSettings>,
         abortable_system: AbortableQueue,
         event_sender: futures::channel::mpsc::UnboundedSender<ElectrumClientEvent>,
+        scripthash_notification_sender: ScripthashNotificationSender,
     ) -> Result<ConnMngSelectiveImpl, String> {
         let mut primary = VecDeque::<String>::new();
         let mut backup = VecDeque::<String>::new();
@@ -371,6 +390,7 @@ impl ConnMngSelectiveImpl {
                 active: None,
                 conn_ctxs,
             }),
+            scripthash_notification_sender,
             abortable_system,
         })
     }
