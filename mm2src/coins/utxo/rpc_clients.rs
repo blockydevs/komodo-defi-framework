@@ -7,6 +7,7 @@ mod conn_mng_multiple;
 #[path = "rpc_clients/conn_mng_selective.rs"]
 mod conn_mng_selective;
 
+use crate::utxo::ScripthashNotification;
 use async_trait::async_trait;
 use chain::{BlockHeader, BlockHeaderBits, BlockHeaderNonce, OutPoint, Transaction as UtxoTx};
 use derive_more::Display;
@@ -67,6 +68,8 @@ use crate::utxo::{output_script, sat_from_big_decimal, GetBlockHeaderError, GetC
                   GetTxHeightError};
 use crate::{big_decimal_from_sat_unsigned, NumConversError, RpcTransportEventHandler, RpcTransportEventHandlerShared};
 
+use super::ScripthashNotificationSender;
+
 cfg_native! {
     use futures::future::Either;
     use futures::io::Error;
@@ -126,6 +129,15 @@ impl rustls::client::ServerCertVerifier for NoCertificateVerification {
 pub enum UtxoRpcClientEnum {
     Native(NativeClient),
     Electrum(ElectrumClient),
+}
+
+impl ToString for UtxoRpcClientEnum {
+    fn to_string(&self) -> String {
+        match self {
+            UtxoRpcClientEnum::Native(_) => "native".to_owned(),
+            UtxoRpcClientEnum::Electrum(_) => "electrum".to_owned(),
+        }
+    }
 }
 
 impl From<ElectrumClient> for UtxoRpcClientEnum {
@@ -359,6 +371,8 @@ pub trait UtxoRpcClientOps: fmt::Debug + Send + Sync + 'static {
 
     /// Submits the raw `tx` transaction (serialized, hex-encoded) to blockchain network.
     fn send_raw_transaction(&self, tx: BytesJson) -> UtxoRpcFut<H256Json>;
+
+    fn blockchain_scripthash_subscribe(&self, scripthash: String) -> UtxoRpcFut<Json>;
 
     /// Returns raw transaction (serialized, hex-encoded) by the given `txid`.
     fn get_transaction_bytes(&self, txid: &H256Json) -> UtxoRpcFut<BytesJson>;
@@ -716,12 +730,12 @@ impl JsonRpcClient for NativeClientImpl {
             .body(Vec::from(request_body))
             .map_err(|e| JsonRpcErrorType::InvalidRequest(e.to_string())));
 
-        let event_handles = self.event_handlers.clone();
+        let event_handlers = self.event_handlers.clone();
         Box::new(slurp_req(http_request).boxed().compat().then(
             move |result| -> Result<(JsonRpcRemoteAddr, JsonRpcResponseEnum), JsonRpcErrorType> {
                 let res = result.map_err(|e| e.into_inner())?;
                 // measure now only body length, because the `hyper` crate doesn't allow to get total HTTP packet length
-                event_handles.on_incoming_response(res.2.len());
+                event_handlers.on_incoming_response(res.2.len());
 
                 let body =
                     std::str::from_utf8(&res.2).map_err(|e| JsonRpcErrorType::parse_error(&uri, e.to_string()))?;
@@ -819,6 +833,13 @@ impl UtxoRpcClientOps for NativeClient {
     /// https://developer.bitcoin.org/reference/rpc/sendrawtransaction
     fn send_raw_transaction(&self, tx: BytesJson) -> UtxoRpcFut<H256Json> {
         Box::new(rpc_func!(self, "sendrawtransaction", tx).map_to_mm_fut(UtxoRpcError::from))
+    }
+
+    fn blockchain_scripthash_subscribe(&self, _scripthash: String) -> UtxoRpcFut<Json> {
+        Box::new(futures01::future::err(
+            UtxoRpcError::Internal("blockchain_scripthash_subscribe` is not supported for Native Clients".to_owned())
+                .into(),
+        ))
     }
 
     fn get_transaction_bytes(&self, txid: &H256Json) -> UtxoRpcFut<BytesJson> {
@@ -1457,6 +1478,7 @@ fn spawn_electrum(
     conn_settings: &ElectrumConnSettings,
     spawner: WeakSpawner,
     event_sender: futures::channel::mpsc::UnboundedSender<ElectrumClientEvent>,
+    scripthash_notification_sender: &ScripthashNotificationSender,
 ) -> Result<(ElectrumConnection, async_oneshot::Receiver<()>), ConnMngError> {
     let config = match conn_settings.protocol {
         ElectrumProtocol::TCP => ElectrumConfig::TCP,
@@ -1491,6 +1513,7 @@ fn spawn_electrum(
         config,
         spawner,
         event_sender,
+        scripthash_notification_sender
     ))
 }
 
@@ -1501,6 +1524,7 @@ fn spawn_electrum(
     conn_settings: &ElectrumConnSettings,
     spawner: WeakSpawner,
     event_sender: futures::channel::mpsc::UnboundedSender<ElectrumClientEvent>,
+    scripthash_notification_sender: &ScripthashNotificationSender,
 ) -> Result<(ElectrumConnection, async_oneshot::Receiver<()>), ConnMngError> {
     let mut url = conn_settings.url.clone();
     let uri: Uri = conn_settings
@@ -1540,6 +1564,7 @@ fn spawn_electrum(
         config,
         spawner,
         event_sender,
+        scripthash_notification_sender
     ))
 }
 
@@ -1635,6 +1660,10 @@ pub struct ElectrumClientImpl {
     list_unspent_concurrent_map: ConcurrentRequestMap<String, Vec<ElectrumUnspent>>,
     block_headers_storage: BlockHeaderStorage,
     negotiate_version: bool,
+    /// This is used for balance event streaming implementation for UTXOs.
+    /// If balance event streaming isn't enabled, this value will always be `None`; otherwise,
+    /// it will be used for sending scripthash messages to trigger re-connections, re-fetching the balances, etc.
+    pub(crate) scripthash_notification_sender: ScripthashNotificationSender,
     abortable_system: AbortableQueue,
 }
 
@@ -1761,6 +1790,13 @@ impl ElectrumClientImpl {
             .await
             .map_err(|err| err.to_string())?;
         conn.lock().await.set_protocol_version(version).await;
+
+        if let Some(sender) = &self.scripthash_notification_sender {
+            sender
+                .unbounded_send(ScripthashNotification::RefreshSubscriptions)
+                .map_err(|e| ERRL!("Failed sending scripthash message. {}", e))?;
+        }
+
         Ok(())
     }
 
@@ -1801,6 +1837,8 @@ pub(super) enum ElectrumClientEvent {
 }
 
 const BLOCKCHAIN_HEADERS_SUB_ID: &str = "blockchain.headers.subscribe";
+
+const BLOCKCHAIN_SCRIPTHASH_SUB_ID: &str = "blockchain.scripthash.subscribe";
 
 impl UtxoJsonRpcClientInfo for ElectrumClient {
     fn coin_name(&self) -> &str { self.coin_ticker.as_str() }
@@ -2396,6 +2434,10 @@ impl UtxoRpcClientOps for ElectrumClient {
         )
     }
 
+    fn blockchain_scripthash_subscribe(&self, scripthash: String) -> UtxoRpcFut<Json> {
+        Box::new(rpc_func!(self, BLOCKCHAIN_SCRIPTHASH_SUB_ID, scripthash).map_to_mm_fut(UtxoRpcError::from))
+    }
+
     /// https://electrumx.readthedocs.io/en/latest/protocol-methods.html#blockchain-transaction-get
     /// returns transaction bytes by default
     fn get_transaction_bytes(&self, txid: &H256Json) -> UtxoRpcFut<BytesJson> {
@@ -2555,6 +2597,7 @@ impl ElectrumClientImpl {
         block_headers_storage: BlockHeaderStorage,
         abortable_system: AbortableQueue,
         event_sender: futures::channel::mpsc::UnboundedSender<ElectrumClientEvent>,
+        scripthash_notification_sender: ScripthashNotificationSender,
     ) -> Result<ElectrumClientImpl, String> {
         let conn_mng_abortable_system = abortable_system
             .create_subsystem()
@@ -2575,7 +2618,6 @@ impl ElectrumClientImpl {
                 event_sender,
             )))),
         };
-
         let protocol_version = OrdRange::new(1.2, 1.4).unwrap();
         Ok(ElectrumClientImpl {
             client_name: client_settings.client_name,
@@ -2589,7 +2631,9 @@ impl ElectrumClientImpl {
             block_headers_storage,
             negotiate_version: client_settings.negotiate_version,
             abortable_system,
-        })
+            negotiate_version,
+            scripthash_notification_sender,
+        }
     }
 
     #[cfg(test)]
@@ -2599,10 +2643,11 @@ impl ElectrumClientImpl {
         block_headers_storage: BlockHeaderStorage,
         abortable_system: AbortableQueue,
         event_sender: futures::channel::mpsc::UnboundedSender<ElectrumClientEvent>,
+        scripthash_notification_sender: ScripthashNotificationSender,
     ) -> ElectrumClientImpl {
         ElectrumClientImpl {
             protocol_version,
-            ..ElectrumClientImpl::try_new(client_settings, block_headers_storage, abortable_system, event_sender)
+            ..ElectrumClientImpl::try_new(client_settings, block_headers_storage, abortable_system, event_sender,  scripthash_notification_sender,)
                 .expect("Expected electrum_client_impl constructed without a problem")
         }
     }
@@ -2613,17 +2658,25 @@ fn rx_to_stream(rx: mpsc::Receiver<Vec<u8>>) -> impl Stream<Item = Vec<u8>, Erro
     rx.map_err(|_| panic!("errors not possible on rx"))
 }
 
-async fn electrum_process_json(raw_json: Json, arc: &JsonRpcPendingRequestsShared) {
+async fn electrum_process_json(
+    raw_json: Json,
+    arc: &JsonRpcPendingRequestsShared,
+    scripthash_notification_sender: &ScripthashNotificationSender,
+) {
     // detect if we got standard JSONRPC response or subscription response as JSONRPC request
     #[derive(Deserialize)]
     #[serde(untagged)]
     enum ElectrumRpcResponseEnum {
+        /// The subscription response as JSONRPC request.
+        ///
+        /// NOTE Because JsonRpcResponse uses default values for each of its field,
+        /// this variant has to stay at top in this enumeration to be properly deserialized
+        /// from serde.
+        SubscriptionNotification(JsonRpcRequest),
         /// The standard JSONRPC single response.
         SingleResponse(JsonRpcResponse),
         /// The batch of standard JSONRPC responses.
         BatchResponses(JsonRpcBatchResponse),
-        /// The subscription response as JSONRPC request.
-        SubscriptionNotification(JsonRpcRequest),
     }
 
     let response: ElectrumRpcResponseEnum = match json::from_value(raw_json) {
@@ -2640,6 +2693,25 @@ async fn electrum_process_json(raw_json: Json, arc: &JsonRpcPendingRequestsShare
         ElectrumRpcResponseEnum::SubscriptionNotification(req) => {
             let id = match req.method.as_ref() {
                 BLOCKCHAIN_HEADERS_SUB_ID => BLOCKCHAIN_HEADERS_SUB_ID,
+                BLOCKCHAIN_SCRIPTHASH_SUB_ID => {
+                    let scripthash = match req.params.first() {
+                        Some(t) => t.as_str().unwrap_or_default(),
+                        None => {
+                            debug!("Notification must contain the scripthash value.");
+                            return;
+                        },
+                    };
+
+                    if let Some(sender) = scripthash_notification_sender {
+                        debug!("Sending scripthash message");
+                        if let Err(e) = sender.unbounded_send(ScripthashNotification::Triggered(scripthash.to_string()))
+                        {
+                            error!("Failed sending scripthash message. {e}");
+                            return;
+                        };
+                    };
+                    BLOCKCHAIN_SCRIPTHASH_SUB_ID
+                },
                 _ => {
                     error!("Couldn't get id of request {:?}", req);
                     return;
@@ -2662,7 +2734,11 @@ async fn electrum_process_json(raw_json: Json, arc: &JsonRpcPendingRequestsShare
     }
 }
 
-async fn electrum_process_chunk(chunk: &[u8], arc: &JsonRpcPendingRequestsShared) {
+async fn electrum_process_chunk(
+    chunk: &[u8],
+    arc: &JsonRpcPendingRequestsShared,
+    scripthash_notification_sender: ScripthashNotificationSender,
+) {
     // we should split the received chunk because we can get several responses in 1 chunk.
     let split = chunk.split(|item| *item == b'\n');
 
@@ -2676,7 +2752,7 @@ async fn electrum_process_chunk(chunk: &[u8], arc: &JsonRpcPendingRequestsShared
                     return;
                 },
             };
-            electrum_process_json(raw_json, arc).await
+            electrum_process_json(raw_json, arc, &scripthash_notification_sender).await
         }
     }
 }
@@ -2799,6 +2875,7 @@ async fn connect_impl<Spawner: SpawnFuture>(
     connection_tx: Arc<AsyncMutex<Option<mpsc::Sender<Vec<u8>>>>>,
     event_sender: futures::channel::mpsc::UnboundedSender<ElectrumClientEvent>,
     conn_ready_notifier: async_oneshot::Sender<()>,
+    scripthash_notification_sender: ScripthashNotificationSender,
     _spawner: Spawner,
 ) {
     let delay = Arc::new(AtomicU64::new(0));
@@ -2862,6 +2939,7 @@ async fn connect_impl<Spawner: SpawnFuture>(
         let delay = delay.clone();
         let addr = addr.clone();
         let responses = responses.clone();
+        let scripthash_notification_sender = scripthash_notification_sender.clone();
         let event_sender = event_sender.clone();
         async move {
             let mut buffer = String::with_capacity(1024);
@@ -2888,7 +2966,7 @@ async fn connect_impl<Spawner: SpawnFuture>(
                 );
                 last_chunk.store(now_ms(), AtomicOrdering::Relaxed);
 
-                electrum_process_chunk(buffer.as_bytes(), &responses).await;
+                electrum_process_chunk(buffer.as_bytes(), &responses, scripthash_notification_sender.clone()).await;
                 buffer.clear();
             }
         }
@@ -2937,6 +3015,7 @@ async fn connect_impl<Spawner: SpawnFuture>(
     connection_tx: Arc<AsyncMutex<Option<mpsc::Sender<Vec<u8>>>>>,
     event_sender: futures::channel::mpsc::UnboundedSender<ElectrumClientEvent>,
     conn_ready_notifier: async_oneshot::Sender<()>,
+    scripthash_notification_sender: ScripthashNotificationSender,
     spawner: Spawner,
 ) {
     use std::sync::atomic::AtomicUsize;
@@ -2968,6 +3047,7 @@ async fn connect_impl<Spawner: SpawnFuture>(
     let incoming_fut = {
         let addr = addr.clone();
         let responses = responses.clone();
+        let scripthash_notification_sender = scripthash_notification_sender.clone();
         let event_sender = event_sender.clone();
         async move {
             while let Some(incoming_res) = transport_rx.next().await {
@@ -2982,7 +3062,7 @@ async fn connect_impl<Spawner: SpawnFuture>(
                             }),
                             addr
                         );
-                        electrum_process_json(incoming_json, &responses).await;
+                        electrum_process_json(incoming_json, &responses, scripthash_notification_sender).await;
                     },
                     Err(e) => {
                         error!("{} error: {:?}", addr, e);
@@ -3048,6 +3128,7 @@ fn electrum_connect(
     config: ElectrumConfig,
     spawner: WeakSpawner,
     event_sender: futures::channel::mpsc::UnboundedSender<ElectrumClientEvent>,
+    scripthash_notification_sender: &ScripthashNotificationSender,
 ) -> (ElectrumConnection, async_oneshot::Receiver<()>) {
     let responses = Arc::new(AsyncMutex::new(JsonRpcPendingRequests::default()));
     let tx = Arc::new(AsyncMutex::new(None));
@@ -3060,6 +3141,7 @@ fn electrum_connect(
         tx.clone(),
         event_sender,
         conn_ready_sender,
+        scripthash_notification_sender.clone(),
         spawner.clone(),
     );
 

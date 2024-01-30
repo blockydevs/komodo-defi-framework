@@ -15,6 +15,7 @@ use common::Future01CompatExt;
 use common::{drop_mutability, true_f};
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
+use mm2_event_stream::EventStreamConfiguration;
 #[cfg(target_arch = "wasm32")]
 use mm2_metamask::MetamaskRpcError;
 use mm2_number::BigDecimal;
@@ -27,7 +28,8 @@ impl From<EthActivationV2Error> for EnablePlatformCoinWithTokensError {
         match err {
             EthActivationV2Error::InvalidPayload(e)
             | EthActivationV2Error::InvalidSwapContractAddr(e)
-            | EthActivationV2Error::InvalidFallbackSwapContract(e) => {
+            | EthActivationV2Error::InvalidFallbackSwapContract(e)
+            | EthActivationV2Error::ErrorDeserializingDerivationPath(e) => {
                 EnablePlatformCoinWithTokensError::InvalidPayload(e)
             },
             #[cfg(target_arch = "wasm32")]
@@ -43,11 +45,11 @@ impl From<EthActivationV2Error> for EnablePlatformCoinWithTokensError {
             EthActivationV2Error::CouldNotFetchBalance(e) | EthActivationV2Error::UnreachableNodes(e) => {
                 EnablePlatformCoinWithTokensError::Transport(e)
             },
-            EthActivationV2Error::ErrorDeserializingDerivationPath(e) => {
-                EnablePlatformCoinWithTokensError::InvalidPayload(e)
-            },
             EthActivationV2Error::PrivKeyPolicyNotAllowed(e) => {
                 EnablePlatformCoinWithTokensError::PrivKeyPolicyNotAllowed(e)
+            },
+            EthActivationV2Error::FailedSpawningBalanceEvents(e) => {
+                EnablePlatformCoinWithTokensError::FailedSpawningBalanceEvents(e)
             },
             #[cfg(target_arch = "wasm32")]
             EthActivationV2Error::MetamaskError(metamask) => {
@@ -276,6 +278,13 @@ impl PlatformWithTokensActivationOps for EthCoin {
         _storage: impl TxHistoryStorage + Send + 'static,
         _initial_balance: Option<BigDecimal>,
     ) {
+    }
+
+    async fn handle_balance_streaming(
+        &self,
+        _config: &EventStreamConfiguration,
+    ) -> Result<(), MmError<Self::ActivationError>> {
+        Ok(())
     }
 }
 

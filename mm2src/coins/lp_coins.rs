@@ -1,5 +1,5 @@
 /******************************************************************************
- * Copyright © 2022 Atomic Private Limited and its contributors               *
+ * Copyright © 2023 Pampex LTD and TillyHK LTD              *
  *                                                                            *
  * See the CONTRIBUTOR-LICENSE-AGREEMENT, COPYING, LICENSE-COPYRIGHT-NOTICE   *
  * and DEVELOPER-CERTIFICATE-OF-ORIGIN files in the LEGAL directory in        *
@@ -7,7 +7,7 @@
  * holder information and the developer policies on copyright and licensing.  *
  *                                                                            *
  * Unless otherwise agreed in a custom licensing agreement, no part of the    *
- * AtomicDEX software, including this file may be copied, modified, propagated*
+ * Komodo DeFi Framework software, including this file may be copied, modified, propagated*
  * or distributed except according to the terms contained in the              *
  * LICENSE-COPYRIGHT-NOTICE file.                                             *
  *                                                                            *
@@ -58,6 +58,7 @@ use futures::compat::Future01CompatExt;
 use futures::lock::Mutex as AsyncMutex;
 use futures::{FutureExt, TryFutureExt};
 use futures01::Future;
+use hex::FromHexError;
 use http::{Response, StatusCode};
 use keys::{AddressFormat as UtxoAddressFormat, KeyPair, NetworkPrefix as CashAddrPrefix};
 use mm2_core::mm_ctx::{from_ctx, MmArc};
@@ -217,6 +218,7 @@ pub mod eth;
 use eth::GetValidEthWithdrawAddError;
 use eth::{eth_coin_from_conf_and_request, get_eth_address, EthCoin, EthGasDetailsErr, EthTxFeeDetails,
           GetEthAddressError, SignedEthTx};
+use ethereum_types::U256;
 
 pub mod hd_confirm_address;
 pub mod hd_pubkey;
@@ -313,9 +315,14 @@ pub type RawTransactionResult = Result<RawTransactionRes, MmError<RawTransaction
 pub type RawTransactionFut<'a> =
     Box<dyn Future<Item = RawTransactionRes, Error = MmError<RawTransactionError>> + Send + 'a>;
 pub type RefundResult<T> = Result<T, MmError<RefundError>>;
-pub type GenAndSignDexFeeSpendResult = MmResult<TxPreimageWithSig, TxGenError>;
-pub type ValidateDexFeeResult = MmResult<(), ValidateDexFeeError>;
-pub type ValidateDexFeeSpendPreimageResult = MmResult<(), ValidateDexFeeSpendPreimageError>;
+/// Helper type used for swap transactions' spend preimage generation result
+pub type GenPreimageResult<Coin> = MmResult<TxPreimageWithSig<Coin>, TxGenError>;
+/// Helper type used for taker funding's validation result
+pub type ValidateTakerFundingResult = MmResult<(), ValidateTakerFundingError>;
+/// Helper type used for taker funding's spend preimage validation result
+pub type ValidateTakerFundingSpendPreimageResult = MmResult<(), ValidateTakerFundingSpendPreimageError>;
+/// Helper type used for taker payment's spend preimage validation result
+pub type ValidateTakerPaymentSpendPreimageResult = MmResult<(), ValidateTakerPaymentSpendPreimageError>;
 
 pub type IguanaPrivKey = Secp256k1Secret;
 
@@ -343,17 +350,34 @@ pub enum RawTransactionError {
     HashNotExist(String),
     #[display(fmt = "Internal error: {}", _0)]
     InternalError(String),
+    #[display(fmt = "Transaction decode error: {}", _0)]
+    DecodeError(String),
+    #[display(fmt = "Invalid param: {}", _0)]
+    InvalidParam(String),
+    #[display(fmt = "Non-existent previous output: {}", _0)]
+    NonExistentPrevOutputError(String),
+    #[display(fmt = "Signing error: {}", _0)]
+    SigningError(String),
+    #[display(fmt = "Not implemented for this coin {}", coin)]
+    NotImplemented { coin: String },
+    #[display(fmt = "Transaction error {}", _0)]
+    TransactionError(String),
 }
 
 impl HttpStatusCode for RawTransactionError {
     fn status_code(&self) -> StatusCode {
         match self {
+            RawTransactionError::Transport(_)
+            | RawTransactionError::InternalError(_)
+            | RawTransactionError::SigningError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             RawTransactionError::NoSuchCoin { .. }
             | RawTransactionError::InvalidHashError(_)
-            | RawTransactionError::HashNotExist(_) => StatusCode::BAD_REQUEST,
-            RawTransactionError::Transport(_) | RawTransactionError::InternalError(_) => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            },
+            | RawTransactionError::HashNotExist(_)
+            | RawTransactionError::DecodeError(_)
+            | RawTransactionError::InvalidParam(_)
+            | RawTransactionError::NonExistentPrevOutputError(_)
+            | RawTransactionError::TransactionError(_) => StatusCode::BAD_REQUEST,
+            RawTransactionError::NotImplemented { .. } => StatusCode::NOT_IMPLEMENTED,
         }
     }
 }
@@ -364,6 +388,14 @@ impl From<CoinFindError> for RawTransactionError {
             CoinFindError::NoSuchCoin { coin } => RawTransactionError::NoSuchCoin { coin },
         }
     }
+}
+
+impl From<NumConversError> for RawTransactionError {
+    fn from(e: NumConversError) -> Self { RawTransactionError::InvalidParam(e.to_string()) }
+}
+
+impl From<FromHexError> for RawTransactionError {
+    fn from(e: FromHexError) -> Self { RawTransactionError::InvalidParam(e.to_string()) }
 }
 
 #[derive(Clone, Debug, Deserialize, Display, EnumFromStringify, PartialEq, Serialize, SerializeErrorType)]
@@ -408,6 +440,62 @@ pub struct RawTransactionRequest {
 pub struct RawTransactionRes {
     /// Raw bytes of signed transaction in hexadecimal string, this should be return hexadecimal encoded signed transaction for get_raw_transaction
     pub tx_hex: BytesJson,
+}
+
+/// Previous utxo transaction data for signing
+#[derive(Clone, Debug, Deserialize)]
+pub struct PrevTxns {
+    /// transaction hash
+    tx_hash: String,
+    /// transaction output index
+    index: u32,
+    /// transaction output script pub key
+    script_pub_key: String,
+    // TODO: implement if needed:
+    // redeem script for P2SH script pubkey
+    // pub redeem_script: Option<String>,
+    /// transaction output amount
+    amount: BigDecimal,
+}
+
+/// sign_raw_transaction RPC request's params for signing raw utxo transactions
+#[derive(Clone, Debug, Deserialize)]
+pub struct SignUtxoTransactionParams {
+    /// unsigned utxo transaction in hex
+    tx_hex: String,
+    /// optional data of previous transactions referred by unsigned transaction inputs
+    prev_txns: Option<Vec<PrevTxns>>,
+    // TODO: add if needed for utxo:
+    // pub sighash_type: Option<String>, optional signature hash type, one of values: NONE, SINGLE, ALL, NONE|ANYONECANPAY, SINGLE|ANYONECANPAY, ALL|ANYONECANPAY (if not set 'ALL' is used)
+    // pub branch_id: Option<u32>, zcash or komodo optional consensus branch id, used for signing transactions ahead of current height
+}
+
+/// sign_raw_transaction RPC request's params for signing raw eth transactions
+#[derive(Clone, Debug, Deserialize)]
+pub struct SignEthTransactionParams {
+    /// Eth transfer value
+    value: Option<BigDecimal>,
+    /// Eth to address
+    to: Option<String>,
+    /// Eth contract data
+    data: Option<String>,
+    /// Eth gas use limit
+    gas_limit: U256,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(tag = "type", content = "tx")]
+pub enum SignRawTransactionEnum {
+    UTXO(SignUtxoTransactionParams),
+    ETH(SignEthTransactionParams),
+}
+
+/// sign_raw_transaction RPC request
+#[derive(Clone, Debug, Deserialize)]
+pub struct SignRawTransactionRequest {
+    coin: String,
+    #[serde(flatten)]
+    tx: SignRawTransactionEnum,
 }
 
 #[derive(Debug, Deserialize)]
@@ -614,31 +702,71 @@ pub struct WatcherValidateTakerFeeInput {
     pub lock_duration: u64,
 }
 
+/// Helper struct wrapping arguments for [WatcherOps::watcher_validate_taker_payment].
 #[derive(Clone)]
 pub struct WatcherValidatePaymentInput {
+    /// Taker payment serialized to raw bytes.
     pub payment_tx: Vec<u8>,
+    /// Payment refund preimage generated by taker.
     pub taker_payment_refund_preimage: Vec<u8>,
-    pub time_lock: u32,
+    /// Taker payment can be refunded after this timestamp.
+    pub time_lock: u64,
+    /// Taker's pubkey.
     pub taker_pub: Vec<u8>,
+    /// Maker's pubkey.
     pub maker_pub: Vec<u8>,
+    /// Hash of the secret generated by maker.
     pub secret_hash: Vec<u8>,
+    /// Validation timeout.
     pub wait_until: u64,
+    /// Required number of taker payment's on-chain confirmations.
     pub confirmations: u64,
+    /// Maker coin.
     pub maker_coin: MmCoinEnum,
 }
 
-#[derive(Clone, Debug)]
-pub struct ValidatePaymentInput {
+#[derive(Clone)]
+pub enum WatcherSpendType {
+    TakerPaymentRefund,
+    MakerPaymentSpend,
+}
+
+#[derive(Clone)]
+pub struct ValidateWatcherSpendInput {
     pub payment_tx: Vec<u8>,
-    pub time_lock_duration: u64,
-    pub time_lock: u32,
-    pub other_pub: Vec<u8>,
+    pub maker_pub: Vec<u8>,
+    pub swap_contract_address: Option<BytesJson>,
+    pub time_lock: u64,
     pub secret_hash: Vec<u8>,
     pub amount: BigDecimal,
+    pub watcher_reward: Option<WatcherReward>,
+    pub spend_type: WatcherSpendType,
+}
+
+/// Helper struct wrapping arguments for [SwapOps::validate_taker_payment] and [SwapOps::validate_maker_payment].
+#[derive(Clone, Debug)]
+pub struct ValidatePaymentInput {
+    /// Payment transaction serialized to raw bytes.
+    pub payment_tx: Vec<u8>,
+    /// Time lock duration in seconds.
+    pub time_lock_duration: u64,
+    /// Payment can be refunded after this timestamp.
+    pub time_lock: u64,
+    /// Pubkey of other side of the swap.
+    pub other_pub: Vec<u8>,
+    /// Hash of the secret generated by maker.
+    pub secret_hash: Vec<u8>,
+    /// Expected payment amount.
+    pub amount: BigDecimal,
+    /// Swap contract address if applicable.
     pub swap_contract_address: Option<BytesJson>,
+    /// SPV proof check timeout.
     pub try_spv_proof_until: u64,
+    /// Required number of payment's on-chain confirmations.
     pub confirmations: u64,
+    /// Unique data of specific swap.
     pub unique_swap_data: Vec<u8>,
+    /// The reward assigned to watcher for providing help to complete the swap.
     pub watcher_reward: Option<WatcherReward>,
 }
 
@@ -663,7 +791,7 @@ pub struct SendMakerPaymentSpendPreimageInput<'a> {
 }
 
 pub struct SearchForSwapTxSpendInput<'a> {
-    pub time_lock: u32,
+    pub time_lock: u64,
     pub other_pub: &'a [u8],
     pub secret_hash: &'a [u8],
     pub tx: &'a [u8],
@@ -690,20 +818,30 @@ pub struct WatcherReward {
     pub send_contract_reward_on_spend: bool,
 }
 
+/// Helper struct wrapping arguments for [SwapOps::send_taker_payment] and [SwapOps::send_maker_payment].
 #[derive(Clone, Debug)]
 pub struct SendPaymentArgs<'a> {
+    /// Time lock duration in seconds.
     pub time_lock_duration: u64,
-    pub time_lock: u32,
+    /// Payment can be refunded after this timestamp.
+    pub time_lock: u64,
     /// This is either:
     /// * Taker's pubkey if this structure is used in [`SwapOps::send_maker_payment`].
     /// * Maker's pubkey if this structure is used in [`SwapOps::send_taker_payment`].
     pub other_pubkey: &'a [u8],
+    /// Hash of the secret generated by maker.
     pub secret_hash: &'a [u8],
+    /// Payment amount
     pub amount: BigDecimal,
+    /// Swap contract address if applicable.
     pub swap_contract_address: &'a Option<BytesJson>,
+    /// Unique data of specific swap.
     pub swap_unique_data: &'a [u8],
+    /// Instructions for the next step of the swap (e.g., Lightning invoice).
     pub payment_instructions: &'a Option<PaymentInstructions>,
+    /// The reward assigned to watcher for providing help to complete the swap.
     pub watcher_reward: Option<WatcherReward>,
+    /// As of now, this field is specifically used to wait for confirmations of ERC20 approval transaction.
     pub wait_for_confirmation_until: u64,
 }
 
@@ -713,7 +851,7 @@ pub struct SpendPaymentArgs<'a> {
     /// * Taker's payment tx if this structure is used in [`SwapOps::send_maker_spends_taker_payment`].
     /// * Maker's payment tx if this structure is used in [`SwapOps::send_taker_spends_maker_payment`].
     pub other_payment_tx: &'a [u8],
-    pub time_lock: u32,
+    pub time_lock: u64,
     /// This is either:
     /// * Taker's pubkey if this structure is used in [`SwapOps::send_maker_spends_taker_payment`].
     /// * Maker's pubkey if this structure is used in [`SwapOps::send_taker_spends_maker_payment`].
@@ -728,7 +866,7 @@ pub struct SpendPaymentArgs<'a> {
 #[derive(Clone, Debug)]
 pub struct RefundPaymentArgs<'a> {
     pub payment_tx: &'a [u8],
-    pub time_lock: u32,
+    pub time_lock: u64,
     /// This is either:
     /// * Taker's pubkey if this structure is used in [`SwapOps::send_maker_refunds_payment`].
     /// * Maker's pubkey if this structure is used in [`SwapOps::send_taker_refunds_payment`].
@@ -739,15 +877,24 @@ pub struct RefundPaymentArgs<'a> {
     pub watcher_reward: bool,
 }
 
+/// Helper struct wrapping arguments for [SwapOps::check_if_my_payment_sent].
 #[derive(Clone, Debug)]
 pub struct CheckIfMyPaymentSentArgs<'a> {
-    pub time_lock: u32,
+    /// Payment can be refunded after this timestamp.
+    pub time_lock: u64,
+    /// Pubkey of other side of the swap.
     pub other_pub: &'a [u8],
+    /// Hash of the secret generated by maker.
     pub secret_hash: &'a [u8],
+    /// Search after specific block to avoid scanning entire blockchain.
     pub search_from_block: u64,
+    /// Swap contract address if applicable.
     pub swap_contract_address: &'a Option<BytesJson>,
+    /// Unique data of specific swap.
     pub swap_unique_data: &'a [u8],
+    /// Payment amount.
     pub amount: &'a BigDecimal,
+    /// Instructions for the next step of the swap (e.g., Lightning invoice).
     pub payment_instructions: &'a Option<PaymentInstructions>,
 }
 
@@ -756,7 +903,7 @@ pub struct ValidateFeeArgs<'a> {
     pub fee_tx: &'a TransactionEnum,
     pub expected_sender: &'a [u8],
     pub fee_addr: &'a [u8],
-    pub amount: &'a BigDecimal,
+    pub dex_fee: &'a DexFee,
     pub min_block_number: u64,
     pub uuid: &'a [u8],
 }
@@ -839,7 +986,7 @@ pub enum WatcherRewardError {
 /// Swap operations (mostly based on the Hash/Time locked transactions implemented by coin wallets).
 #[async_trait]
 pub trait SwapOps {
-    fn send_taker_fee(&self, fee_addr: &[u8], amount: BigDecimal, uuid: &[u8]) -> TransactionFut;
+    fn send_taker_fee(&self, fee_addr: &[u8], dex_fee: DexFee, uuid: &[u8]) -> TransactionFut;
 
     fn send_maker_payment(&self, maker_payment_args: SendPaymentArgs<'_>) -> TransactionFut;
 
@@ -974,26 +1121,28 @@ pub trait WatcherOps {
 
     fn create_taker_payment_refund_preimage(
         &self,
-        _taker_payment_tx: &[u8],
-        _time_lock: u32,
-        _maker_pub: &[u8],
-        _secret_hash: &[u8],
-        _swap_contract_address: &Option<BytesJson>,
-        _swap_unique_data: &[u8],
+        taker_payment_tx: &[u8],
+        time_lock: u64,
+        maker_pub: &[u8],
+        secret_hash: &[u8],
+        swap_contract_address: &Option<BytesJson>,
+        swap_unique_data: &[u8],
     ) -> TransactionFut;
 
     fn create_maker_payment_spend_preimage(
         &self,
-        _maker_payment_tx: &[u8],
-        _time_lock: u32,
-        _maker_pub: &[u8],
-        _secret_hash: &[u8],
-        _swap_unique_data: &[u8],
+        maker_payment_tx: &[u8],
+        time_lock: u64,
+        maker_pub: &[u8],
+        secret_hash: &[u8],
+        swap_unique_data: &[u8],
     ) -> TransactionFut;
 
     fn watcher_validate_taker_fee(&self, input: WatcherValidateTakerFeeInput) -> ValidatePaymentFut<()>;
 
-    fn watcher_validate_taker_payment(&self, _input: WatcherValidatePaymentInput) -> ValidatePaymentFut<()>;
+    fn watcher_validate_taker_payment(&self, input: WatcherValidatePaymentInput) -> ValidatePaymentFut<()>;
+
+    fn taker_validates_payment_spend_or_refund(&self, _input: ValidateWatcherSpendInput) -> ValidatePaymentFut<()>;
 
     async fn watcher_search_for_swap_tx_spend(
         &self,
@@ -1017,51 +1166,125 @@ pub trait WatcherOps {
     ) -> Result<Option<WatcherReward>, MmError<WatcherRewardError>>;
 }
 
-pub struct SendDexFeeWithPremiumArgs<'a> {
-    pub time_lock: u32,
-    pub secret_hash: &'a [u8],
-    pub other_pub: &'a [u8],
-    pub dex_fee_amount: BigDecimal,
-    pub premium_amount: BigDecimal,
-    pub swap_unique_data: &'a [u8],
-}
-
-pub struct ValidateDexFeeArgs<'a> {
-    pub dex_fee_tx: &'a [u8],
-    pub time_lock: u32,
-    pub secret_hash: &'a [u8],
-    pub other_pub: &'a [u8],
-    pub dex_fee_amount: BigDecimal,
-    pub premium_amount: BigDecimal,
-    pub swap_unique_data: &'a [u8],
-}
-
-pub struct GenDexFeeSpendArgs<'a> {
-    pub dex_fee_tx: &'a [u8],
-    pub time_lock: u32,
-    pub secret_hash: &'a [u8],
+/// Helper struct wrapping arguments for [SwapOpsV2::send_taker_funding]
+pub struct SendTakerFundingArgs<'a> {
+    /// Taker will be able to refund the payment after this timestamp
+    pub time_lock: u64,
+    /// The hash of the secret generated by taker, this needs to be revealed for immediate refund
+    pub taker_secret_hash: &'a [u8],
+    /// Maker's pubkey
     pub maker_pub: &'a [u8],
-    pub taker_pub: &'a [u8],
-    pub dex_fee_pub: &'a [u8],
+    /// DEX fee amount
     pub dex_fee_amount: BigDecimal,
+    /// Additional reward for maker (premium)
     pub premium_amount: BigDecimal,
+    /// Actual volume of taker's payment
+    pub trading_amount: BigDecimal,
+    /// Unique data of specific swap
+    pub swap_unique_data: &'a [u8],
 }
 
-pub struct TxPreimageWithSig {
-    preimage: Vec<u8>,
-    signature: Vec<u8>,
+/// Helper struct wrapping arguments for [SwapOpsV2::refund_taker_funding_secret]
+pub struct RefundFundingSecretArgs<'a, Coin: CoinAssocTypes + ?Sized> {
+    pub funding_tx: &'a Coin::Tx,
+    pub time_lock: u64,
+    pub maker_pubkey: &'a Coin::Pubkey,
+    pub taker_secret: &'a [u8],
+    pub taker_secret_hash: &'a [u8],
+    pub swap_contract_address: &'a Option<BytesJson>,
+    pub swap_unique_data: &'a [u8],
+    pub watcher_reward: bool,
 }
 
-#[derive(Debug)]
+/// Helper struct wrapping arguments for [SwapOpsV2::gen_taker_funding_spend_preimage]
+pub struct GenTakerFundingSpendArgs<'a, Coin: CoinAssocTypes + ?Sized> {
+    /// Taker payment transaction serialized to raw bytes
+    pub funding_tx: &'a Coin::Tx,
+    /// Maker's pubkey
+    pub maker_pub: &'a Coin::Pubkey,
+    /// Taker's pubkey
+    pub taker_pub: &'a Coin::Pubkey,
+    /// Timelock of the funding tx
+    pub funding_time_lock: u64,
+    /// The hash of the secret generated by taker
+    pub taker_secret_hash: &'a [u8],
+    /// Timelock of the taker payment
+    pub taker_payment_time_lock: u64,
+    /// The hash of the secret generated by maker
+    pub maker_secret_hash: &'a [u8],
+}
+
+/// Helper struct wrapping arguments for [SwapOpsV2::validate_taker_funding]
+pub struct ValidateTakerFundingArgs<'a, Coin: CoinAssocTypes + ?Sized> {
+    /// Taker funding transaction
+    pub funding_tx: &'a Coin::Tx,
+    /// Taker will be able to refund the payment after this timestamp
+    pub time_lock: u64,
+    /// The hash of the secret generated by taker
+    pub taker_secret_hash: &'a [u8],
+    /// Taker's pubkey
+    pub other_pub: &'a Coin::Pubkey,
+    /// DEX fee amount
+    pub dex_fee_amount: BigDecimal,
+    /// Additional reward for maker (premium)
+    pub premium_amount: BigDecimal,
+    /// Actual volume of taker's payment
+    pub trading_amount: BigDecimal,
+    /// Unique data of specific swap
+    pub swap_unique_data: &'a [u8],
+}
+
+/// Helper struct wrapping arguments for taker payment's spend generation, used in
+/// [SwapOpsV2::gen_taker_payment_spend_preimage], [SwapOpsV2::validate_taker_payment_spend_preimage] and
+/// [SwapOpsV2::sign_and_broadcast_taker_payment_spend]
+pub struct GenTakerPaymentSpendArgs<'a, Coin: CoinAssocTypes + ?Sized> {
+    /// Taker payment transaction serialized to raw bytes
+    pub taker_tx: &'a Coin::Tx,
+    /// Taker will be able to refund the payment after this timestamp
+    pub time_lock: u64,
+    /// The hash of the secret generated by maker
+    pub secret_hash: &'a [u8],
+    /// Maker's pubkey
+    pub maker_pub: &'a Coin::Pubkey,
+    /// Taker's pubkey
+    pub taker_pub: &'a Coin::Pubkey,
+    /// Pubkey of address, receiving DEX fees
+    pub dex_fee_pub: &'a [u8],
+    /// DEX fee amount
+    pub dex_fee_amount: BigDecimal,
+    /// Additional reward for maker (premium)
+    pub premium_amount: BigDecimal,
+    /// Actual volume of taker's payment
+    pub trading_amount: BigDecimal,
+}
+
+/// Taker payment spend preimage with taker's signature
+pub struct TxPreimageWithSig<Coin: CoinAssocTypes + ?Sized> {
+    /// The preimage, might be () for certain coin types (only signature might be used)
+    pub preimage: Coin::Preimage,
+    /// Taker's signature
+    pub signature: Coin::Sig,
+}
+
+/// Enum covering error cases that can happen during transaction preimage generation.
+#[derive(Debug, Display)]
 pub enum TxGenError {
+    /// RPC error
     Rpc(String),
+    /// Error during conversion of BigDecimal amount to coin's specific monetary units (satoshis, wei, etc.).
     NumConversion(String),
+    /// Address derivation error.
     AddressDerivation(String),
-    TxDeserialization(String),
-    InvalidPubkey(String),
+    /// Problem with tx preimage signing.
     Signing(String),
-    MinerFeeExceedsPremium { miner_fee: BigDecimal, premium: BigDecimal },
+    /// Legacy error produced by usage of try_s/try_fus and other similar macros.
     Legacy(String),
+    /// Input payment timelock overflows the type used by specific coin.
+    LocktimeOverflow(String),
+    /// Transaction fee is too high
+    TxFeeTooHigh(String),
+    /// Previous tx is not valid
+    PrevTxIsNotValid(String),
 }
 
 impl From<UtxoRpcError> for TxGenError {
@@ -1076,76 +1299,192 @@ impl From<UtxoSignWithKeyPairError> for TxGenError {
     fn from(err: UtxoSignWithKeyPairError) -> Self { TxGenError::Signing(err.to_string()) }
 }
 
-#[derive(Debug)]
-pub enum ValidateDexFeeError {
+/// Enum covering error cases that can happen during taker funding validation.
+#[derive(Debug, Display)]
+pub enum ValidateTakerFundingError {
+    /// Payment sent to wrong address or has invalid amount.
     InvalidDestinationOrAmount(String),
-    InvalidPubkey(String),
+    /// Error during conversion of BigDecimal amount to coin's specific monetary units (satoshis, wei, etc.).
     NumConversion(String),
+    /// RPC error.
     Rpc(String),
+    /// Serialized tx bytes don't match ones received from coin's RPC.
+    #[display(fmt = "Tx bytes {:02x} don't match ones received from rpc {:02x}", actual, from_rpc)]
     TxBytesMismatch { from_rpc: BytesJson, actual: BytesJson },
-    TxDeserialization(String),
+    /// Provided transaction doesn't have output with specific index
     TxLacksOfOutputs,
+    /// Input payment timelock overflows the type used by specific coin.
+    LocktimeOverflow(String),
 }
 
-impl From<NumConversError> for ValidateDexFeeError {
-    fn from(err: NumConversError) -> Self { ValidateDexFeeError::NumConversion(err.to_string()) }
+impl From<NumConversError> for ValidateTakerFundingError {
+    fn from(err: NumConversError) -> Self { ValidateTakerFundingError::NumConversion(err.to_string()) }
 }
 
-impl From<UtxoRpcError> for ValidateDexFeeError {
-    fn from(err: UtxoRpcError) -> Self { ValidateDexFeeError::Rpc(err.to_string()) }
+impl From<UtxoRpcError> for ValidateTakerFundingError {
+    fn from(err: UtxoRpcError) -> Self { ValidateTakerFundingError::Rpc(err.to_string()) }
 }
 
-#[derive(Debug)]
-pub enum ValidateDexFeeSpendPreimageError {
-    InvalidPubkey(String),
-    InvalidTakerSignature,
+/// Enum covering error cases that can happen during taker funding spend preimage validation.
+#[derive(Debug, Display)]
+pub enum ValidateTakerFundingSpendPreimageError {
+    /// Funding tx has no outputs
+    FundingTxNoOutputs,
+    /// Actual preimage fee is either too high or too small
+    UnexpectedPreimageFee(String),
+    /// Error during signature deserialization.
+    InvalidMakerSignature,
+    /// Error during preimage comparison to an expected one.
     InvalidPreimage(String),
+    /// Error during taker's signature check.
     SignatureVerificationFailure(String),
-    TxDeserialization(String),
+    /// Error during generation of an expected preimage.
     TxGenError(String),
+    /// Input payment timelock overflows the type used by specific coin.
+    LocktimeOverflow(String),
+    /// Coin's RPC error
+    Rpc(String),
 }
 
-impl From<UtxoSignWithKeyPairError> for ValidateDexFeeSpendPreimageError {
+impl From<UtxoSignWithKeyPairError> for ValidateTakerFundingSpendPreimageError {
     fn from(err: UtxoSignWithKeyPairError) -> Self {
-        ValidateDexFeeSpendPreimageError::SignatureVerificationFailure(err.to_string())
+        ValidateTakerFundingSpendPreimageError::SignatureVerificationFailure(err.to_string())
     }
 }
 
-impl From<TxGenError> for ValidateDexFeeSpendPreimageError {
-    fn from(err: TxGenError) -> Self { ValidateDexFeeSpendPreimageError::TxGenError(format!("{:?}", err)) }
+impl From<TxGenError> for ValidateTakerFundingSpendPreimageError {
+    fn from(err: TxGenError) -> Self { ValidateTakerFundingSpendPreimageError::TxGenError(format!("{:?}", err)) }
 }
 
+impl From<UtxoRpcError> for ValidateTakerFundingSpendPreimageError {
+    fn from(err: UtxoRpcError) -> Self { ValidateTakerFundingSpendPreimageError::Rpc(err.to_string()) }
+}
+
+/// Enum covering error cases that can happen during taker payment spend preimage validation.
+#[derive(Debug, Display)]
+pub enum ValidateTakerPaymentSpendPreimageError {
+    /// Error during signature deserialization.
+    InvalidTakerSignature,
+    /// Error during preimage comparison to an expected one.
+    InvalidPreimage(String),
+    /// Error during taker's signature check.
+    SignatureVerificationFailure(String),
+    /// Error during generation of an expected preimage.
+    TxGenError(String),
+    /// Input payment timelock overflows the type used by specific coin.
+    LocktimeOverflow(String),
+}
+
+impl From<UtxoSignWithKeyPairError> for ValidateTakerPaymentSpendPreimageError {
+    fn from(err: UtxoSignWithKeyPairError) -> Self {
+        ValidateTakerPaymentSpendPreimageError::SignatureVerificationFailure(err.to_string())
+    }
+}
+
+impl From<TxGenError> for ValidateTakerPaymentSpendPreimageError {
+    fn from(err: TxGenError) -> Self { ValidateTakerPaymentSpendPreimageError::TxGenError(format!("{:?}", err)) }
+}
+
+/// Helper trait used for various types serialization to bytes
+pub trait ToBytes {
+    fn to_bytes(&self) -> Vec<u8>;
+}
+
+/// Defines associated types specific to each coin (Pubkey, Address, etc.)
+pub trait CoinAssocTypes {
+    type Pubkey: ToBytes + Send + Sync;
+    type PubkeyParseError: fmt::Debug + Send + fmt::Display;
+    type Tx: Transaction + Send + Sync;
+    type TxParseError: fmt::Debug + Send + fmt::Display;
+    type Preimage: ToBytes + Send + Sync;
+    type PreimageParseError: fmt::Debug + Send + fmt::Display;
+    type Sig: ToBytes + Send + Sync;
+    type SigParseError: fmt::Debug + Send + fmt::Display;
+
+    fn parse_pubkey(&self, pubkey: &[u8]) -> Result<Self::Pubkey, Self::PubkeyParseError>;
+
+    fn parse_tx(&self, tx: &[u8]) -> Result<Self::Tx, Self::TxParseError>;
+
+    fn parse_preimage(&self, tx: &[u8]) -> Result<Self::Preimage, Self::PreimageParseError>;
+
+    fn parse_signature(&self, sig: &[u8]) -> Result<Self::Sig, Self::SigParseError>;
+}
+
+/// Operations specific to the [Trading Protocol Upgrade implementation](https://github.com/KomodoPlatform/komodo-defi-framework/issues/1895)
 #[async_trait]
-pub trait SwapOpsV2 {
-    async fn send_dex_fee_with_premium(&self, args: SendDexFeeWithPremiumArgs<'_>) -> TransactionResult;
+pub trait SwapOpsV2: CoinAssocTypes + Send + Sync + 'static {
+    /// Generate and broadcast taker funding transaction that includes dex fee, maker premium and actual trading volume.
+    /// Funding tx can be reclaimed immediately if maker back-outs (doesn't send maker payment)
+    async fn send_taker_funding(&self, args: SendTakerFundingArgs<'_>) -> Result<Self::Tx, TransactionErr>;
 
-    async fn validate_dex_fee_with_premium(&self, args: ValidateDexFeeArgs<'_>) -> ValidateDexFeeResult;
+    /// Validates taker funding transaction.
+    async fn validate_taker_funding(&self, args: ValidateTakerFundingArgs<'_, Self>) -> ValidateTakerFundingResult;
 
-    async fn refund_dex_fee_with_premium(&self, args: RefundPaymentArgs<'_>) -> TransactionResult;
+    /// Refunds taker funding transaction using time-locked path without secret reveal.
+    async fn refund_taker_funding_timelock(&self, args: RefundPaymentArgs<'_>) -> TransactionResult;
 
-    async fn gen_and_sign_dex_fee_spend_preimage(
+    /// Reclaims taker funding transaction using immediate refund path with secret reveal.
+    async fn refund_taker_funding_secret(
         &self,
-        args: &GenDexFeeSpendArgs<'_>,
+        args: RefundFundingSecretArgs<'_, Self>,
+    ) -> Result<Self::Tx, TransactionErr>;
+
+    /// Generates and signs a preimage spending funding tx to the combined taker payment
+    async fn gen_taker_funding_spend_preimage(
+        &self,
+        args: &GenTakerFundingSpendArgs<'_, Self>,
         swap_unique_data: &[u8],
-    ) -> GenAndSignDexFeeSpendResult;
+    ) -> GenPreimageResult<Self>;
 
-    async fn validate_dex_fee_spend_preimage(
+    /// Validates taker funding spend preimage generated and signed by maker
+    async fn validate_taker_funding_spend_preimage(
         &self,
-        gen_args: &GenDexFeeSpendArgs<'_>,
-        preimage: &TxPreimageWithSig,
-    ) -> ValidateDexFeeSpendPreimageResult;
+        gen_args: &GenTakerFundingSpendArgs<'_, Self>,
+        preimage: &TxPreimageWithSig<Self>,
+    ) -> ValidateTakerFundingSpendPreimageResult;
 
-    async fn sign_and_broadcast_dex_fee_spend(
+    /// Generates and signs a preimage spending funding tx to the combined taker payment
+    async fn sign_and_send_taker_funding_spend(
         &self,
-        preimage: &TxPreimageWithSig,
-        gen_args: &GenDexFeeSpendArgs<'_>,
+        preimage: &TxPreimageWithSig<Self>,
+        args: &GenTakerFundingSpendArgs<'_, Self>,
+        swap_unique_data: &[u8],
+    ) -> Result<Self::Tx, TransactionErr>;
+
+    /// Refunds taker payment transaction.
+    async fn refund_combined_taker_payment(&self, args: RefundPaymentArgs<'_>) -> TransactionResult;
+
+    /// Generates and signs taker payment spend preimage. The preimage and signature should be
+    /// shared with maker to proceed with protocol execution.
+    async fn gen_taker_payment_spend_preimage(
+        &self,
+        args: &GenTakerPaymentSpendArgs<'_, Self>,
+        swap_unique_data: &[u8],
+    ) -> GenPreimageResult<Self>;
+
+    /// Validate taker payment spend preimage on maker's side.
+    async fn validate_taker_payment_spend_preimage(
+        &self,
+        gen_args: &GenTakerPaymentSpendArgs<'_, Self>,
+        preimage: &TxPreimageWithSig<Self>,
+    ) -> ValidateTakerPaymentSpendPreimageResult;
+
+    /// Sign and broadcast taker payment spend on maker's side.
+    async fn sign_and_broadcast_taker_payment_spend(
+        &self,
+        preimage: &TxPreimageWithSig<Self>,
+        gen_args: &GenTakerPaymentSpendArgs<'_, Self>,
         secret: &[u8],
         swap_unique_data: &[u8],
     ) -> TransactionResult;
+
+    /// Derives an HTLC key-pair and returns a public key corresponding to that key.
+    fn derive_htlc_pubkey_v2(&self, swap_unique_data: &[u8]) -> Self::Pubkey;
 }
 
 /// Operations that coins have independently from the MarketMaker.
 /// That is, things implemented by the coin wallets or public coin services.
+#[async_trait]
 pub trait MarketCoinOps {
     fn ticker(&self) -> &str;
 
@@ -1185,6 +1524,9 @@ pub trait MarketCoinOps {
 
     /// Receives raw transaction bytes as input and returns tx hash in hexadecimal format
     fn send_raw_tx_bytes(&self, tx: &[u8]) -> Box<dyn Future<Item = String, Error = String> + Send>;
+
+    /// Signs raw utxo transaction in hexadecimal format as input and returns signed transaction in hexadecimal format
+    async fn sign_raw_tx(&self, args: &SignRawTransactionRequest) -> RawTransactionResult;
 
     fn wait_for_confirmations(&self, input: ConfirmPaymentInput) -> Box<dyn Future<Item = (), Error = String> + Send>;
 
@@ -1726,7 +2068,8 @@ impl NumConversError {
     pub fn description(&self) -> &str { &self.0 }
 }
 
-#[derive(Clone, Debug, Display, PartialEq, Serialize)]
+#[derive(Clone, Debug, Display, PartialEq, Serialize, SerializeErrorType)]
+#[serde(tag = "error_type", content = "error_data")]
 pub enum BalanceError {
     #[display(fmt = "Transport: {}", _0)]
     Transport(String),
@@ -2418,7 +2761,7 @@ pub trait MmCoin:
     /// Get transaction fee the Taker has to pay to send a `TakerFee` transaction and check if the wallet has sufficient balance to pay the fee.
     async fn get_fee_to_send_taker_fee(
         &self,
-        dex_fee_amount: BigDecimal,
+        dex_fee_amount: DexFee,
         stage: FeeApproxStage,
     ) -> TradePreimageResult<TradeFee>;
 
@@ -2696,6 +3039,72 @@ impl MmCoinStruct {
     }
 }
 
+/// Represents the different types of DEX fees.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DexFee {
+    /// Standard dex fee which will be sent to the dex fee address
+    Standard(MmNumber),
+    /// Dex fee with the burn amount.
+    ///   - `fee_amount` goes to the dex fee address.
+    ///   - `burn_amount` will be added as `OP_RETURN` output in the dex fee transaction.
+    WithBurn {
+        fee_amount: MmNumber,
+        burn_amount: MmNumber,
+    },
+}
+
+impl DexFee {
+    /// Creates a new `DexFee` with burn amounts.
+    pub fn with_burn(fee_amount: MmNumber, burn_amount: MmNumber) -> DexFee {
+        DexFee::WithBurn {
+            fee_amount,
+            burn_amount,
+        }
+    }
+
+    /// Gets the fee amount associated with the dex fee.
+    pub fn fee_amount(&self) -> MmNumber {
+        match self {
+            DexFee::Standard(t) => t.clone(),
+            DexFee::WithBurn { fee_amount, .. } => fee_amount.clone(),
+        }
+    }
+
+    /// Gets the burn amount associated with the dex fee, if applicable.
+    pub fn burn_amount(&self) -> Option<MmNumber> {
+        match self {
+            DexFee::Standard(_) => None,
+            DexFee::WithBurn { burn_amount, .. } => Some(burn_amount.clone()),
+        }
+    }
+
+    /// Calculates the total spend amount, considering both the fee and burn amounts.
+    pub fn total_spend_amount(&self) -> MmNumber {
+        match self {
+            DexFee::Standard(t) => t.clone(),
+            DexFee::WithBurn {
+                fee_amount,
+                burn_amount,
+            } => fee_amount + burn_amount,
+        }
+    }
+
+    /// Converts the fee amount to micro-units based on the specified decimal places.
+    pub fn fee_uamount(&self, decimals: u8) -> NumConversResult<u64> {
+        let fee_amount = self.fee_amount();
+        utxo::sat_from_big_decimal(&fee_amount.into(), decimals)
+    }
+
+    /// Converts the burn amount to micro-units, if applicable, based on the specified decimal places.
+    pub fn burn_uamount(&self, decimals: u8) -> NumConversResult<Option<u64>> {
+        if let Some(burn_amount) = self.burn_amount() {
+            Ok(Some(utxo::sat_from_big_decimal(&burn_amount.into(), decimals)?))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
 pub struct CoinsContext {
     /// A map from a currency ticker symbol to the corresponding coin.
     /// Similar to `LP_coins`.
@@ -2789,19 +3198,17 @@ impl CoinsContext {
         }
 
         // Tokens can't be activated without platform coin so we can safely insert them without checking prior existence
-        let mut token_tickers = Vec::with_capacity(tokens.len());
+        let mut token_tickers = HashSet::with_capacity(tokens.len());
         // TODO
         // Handling for these case:
         // USDT was activated via enable RPC
         // We try to activate ETH coin and USDT token via enable_eth_with_tokens
         for token in tokens {
-            token_tickers.push(token.ticker().to_string());
+            token_tickers.insert(token.ticker().to_string());
             coins
                 .entry(token.ticker().into())
                 .or_insert_with(|| MmCoinStruct::new(token));
         }
-
-        token_tickers.dedup();
 
         platform_coin_tokens
             .entry(platform_ticker)
@@ -3553,6 +3960,11 @@ pub async fn verify_message(ctx: MmArc, req: VerificationRequest) -> Verificatio
     let is_valid = coin.verify_message(&req.signature, &req.message, &req.address)?;
 
     Ok(VerificationResponse { is_valid })
+}
+
+pub async fn sign_raw_transaction(ctx: MmArc, req: SignRawTransactionRequest) -> RawTransactionResult {
+    let coin = lp_coinfind_or_err(&ctx, &req.coin).await?;
+    coin.sign_raw_tx(&req).await
 }
 
 pub async fn remove_delegation(ctx: MmArc, req: RemoveDelegateRequest) -> DelegationResult {

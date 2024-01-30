@@ -5,9 +5,9 @@ use crate::utxo::rpc_clients::{ElectrumClient, ElectrumClientSettings, ElectrumC
 use crate::utxo::tx_cache::{UtxoVerboseCacheOps, UtxoVerboseCacheShared};
 use crate::utxo::utxo_block_header_storage::BlockHeaderStorage;
 use crate::utxo::utxo_builder::utxo_conf_builder::{UtxoConfBuilder, UtxoConfError};
-use crate::utxo::{output_script, utxo_common, ElectrumBuilderArgs, RecentlySpentOutPoints, TxFee, UtxoCoinConf,
-                  UtxoCoinFields, UtxoHDAccount, UtxoHDWallet, UtxoRpcMode, UtxoSyncStatus, UtxoSyncStatusLoopHandle,
-                  DEFAULT_GAP_LIMIT, UTXO_DUST_AMOUNT};
+use crate::utxo::{output_script, utxo_common, ElectrumBuilderArgs, RecentlySpentOutPoints, ScripthashNotification,
+                  ScripthashNotificationSender, TxFee, UtxoCoinConf, UtxoCoinFields, UtxoHDAccount, UtxoHDWallet,
+                  UtxoRpcMode, UtxoSyncStatus, UtxoSyncStatusLoopHandle, DEFAULT_GAP_LIMIT, UTXO_DUST_AMOUNT};
 use crate::{BlockchainNetwork, CoinTransportMetrics, DerivationMethod, HistorySyncState, IguanaPrivKey,
             PrivKeyBuildPolicy, PrivKeyPolicy, PrivKeyPolicyNotAllowed, RpcClientType, UtxoActivationParams};
 
@@ -18,7 +18,7 @@ use common::now_sec;
 use crypto::{Bip32DerPathError, CryptoCtx, CryptoCtxError, GlobalHDAccountArc, HwWalletType, StandardHDPathError,
              StandardHDPathToCoin};
 use derive_more::Display;
-use futures::channel::mpsc::{channel, Receiver as AsyncReceiver};
+use futures::channel::mpsc::{channel, unbounded, Receiver as AsyncReceiver, UnboundedSender};
 use futures::compat::Future01CompatExt;
 use futures::lock::Mutex as AsyncMutex;
 use keys::bytes::Bytes;
@@ -86,6 +86,12 @@ pub enum UtxoCoinBuildError {
     #[display(fmt = "SPV params verificaiton failed. Error: {_0}")]
     SPVError(SPVError),
     ErrorCalculatingStartingHeight(String),
+    #[display(fmt = "Failed spawning balance events. Error: {_0}")]
+    FailedSpawningBalanceEvents(String),
+    #[display(fmt = "Can not enable balance events for {} mode.", mode)]
+    UnsupportedModeForBalanceEvents {
+        mode: String,
+    },
 }
 
 impl From<UtxoConfError> for UtxoCoinBuildError {
@@ -190,6 +196,25 @@ pub trait UtxoFieldsWithGlobalHDBuilder: UtxoCoinBuilderCommonOps {
     }
 }
 
+// The return type is one-time used only. No need to create a type for it.
+#[allow(clippy::type_complexity)]
+fn get_scripthash_notification_handlers(
+    ctx: &MmArc,
+) -> Option<(
+    UnboundedSender<ScripthashNotification>,
+    Arc<AsyncMutex<UnboundedReceiver<ScripthashNotification>>>,
+)> {
+    if ctx.event_stream_configuration.is_some() {
+        let (sender, receiver): (
+            UnboundedSender<ScripthashNotification>,
+            UnboundedReceiver<ScripthashNotification>,
+        ) = futures::channel::mpsc::unbounded();
+        Some((sender, Arc::new(AsyncMutex::new(receiver))))
+    } else {
+        None
+    }
+}
+
 async fn build_utxo_coin_fields_with_conf_and_policy<Builder>(
     builder: &Builder,
     conf: UtxoCoinConf,
@@ -212,11 +237,19 @@ where
     let my_script_pubkey = output_script(&my_address, ScriptType::P2PKH).to_bytes();
     let derivation_method = DerivationMethod::SingleAddress(my_address);
 
+    let (scripthash_notification_sender, scripthash_notification_handler) =
+        match get_scripthash_notification_handlers(builder.ctx()) {
+            Some((sender, receiver)) => (Some(sender), Some(receiver)),
+            None => (None, None),
+        };
+
     // Create an abortable system linked to the `MmCtx` so if the context is stopped via `MmArc::stop`,
     // all spawned futures related to this `UTXO` coin will be aborted as well.
     let abortable_system: AbortableQueue = builder.ctx().abortable_system.create_subsystem()?;
 
-    let rpc_client = builder.rpc_client(abortable_system.create_subsystem()?).await?;
+    let rpc_client = builder
+        .rpc_client(scripthash_notification_sender, abortable_system.create_subsystem()?)
+        .await?;
     let tx_fee = builder.tx_fee(&rpc_client).await?;
     let decimals = builder.decimals(&rpc_client).await?;
     let dust_amount = builder.dust_amount();
@@ -244,7 +277,10 @@ where
         block_headers_status_notifier,
         block_headers_status_watcher,
         abortable_system,
+        scripthash_notification_handler,
+        ctx: builder.ctx().weak(),
     };
+
     Ok(coin)
 }
 
@@ -285,11 +321,19 @@ pub trait UtxoFieldsWithHardwareWalletBuilder: UtxoCoinBuilderCommonOps {
             gap_limit,
         };
 
+        let (scripthash_notification_sender, scripthash_notification_handler) =
+            match get_scripthash_notification_handlers(self.ctx()) {
+                Some((sender, receiver)) => (Some(sender), Some(receiver)),
+                None => (None, None),
+            };
+
         // Create an abortable system linked to the `MmCtx` so if the context is stopped via `MmArc::stop`,
         // all spawned futures related to this `UTXO` coin will be aborted as well.
         let abortable_system: AbortableQueue = self.ctx().abortable_system.create_subsystem()?;
 
-        let rpc_client = self.rpc_client(abortable_system.create_subsystem()?).await?;
+        let rpc_client = self
+            .rpc_client(scripthash_notification_sender, abortable_system.create_subsystem()?)
+            .await?;
         let tx_fee = self.tx_fee(&rpc_client).await?;
         let decimals = self.decimals(&rpc_client).await?;
         let dust_amount = self.dust_amount();
@@ -317,6 +361,8 @@ pub trait UtxoFieldsWithHardwareWalletBuilder: UtxoCoinBuilderCommonOps {
             block_headers_status_notifier,
             block_headers_status_watcher,
             abortable_system,
+            scripthash_notification_handler,
+            ctx: self.ctx().weak(),
         };
         Ok(coin)
     }
@@ -461,7 +507,11 @@ pub trait UtxoCoinBuilderCommonOps {
         }
     }
 
-    async fn rpc_client(&self, abortable_system: AbortableQueue) -> UtxoCoinBuildResult<UtxoRpcClientEnum> {
+    async fn rpc_client(
+        &self,
+        scripthash_notification_sender: ScripthashNotificationSender,
+        abortable_system: AbortableQueue,
+    ) -> UtxoCoinBuildResult<UtxoRpcClientEnum> {
         match self.activation_params().mode.clone() {
             UtxoRpcMode::Native => {
                 #[cfg(target_arch = "wasm32")]
@@ -476,7 +526,12 @@ pub trait UtxoCoinBuilderCommonOps {
             },
             UtxoRpcMode::Electrum { servers } => {
                 let electrum = self
-                    .electrum_client(abortable_system, ElectrumBuilderArgs::default(), servers)
+                    .electrum_client(
+                        abortable_system,
+                        ElectrumBuilderArgs::default(),
+                        servers,
+                        scripthash_notification_sender,
+                    )
                     .await?;
                 Ok(UtxoRpcClientEnum::Electrum(electrum))
             },
@@ -490,6 +545,7 @@ pub trait UtxoCoinBuilderCommonOps {
         abortable_system: AbortableQueue,
         args: ElectrumBuilderArgs,
         servers: Vec<ElectrumConnSettings>,
+        scripthash_notification_sender: ScripthashNotificationSender,
     ) -> UtxoCoinBuildResult<ElectrumClient> {
         let coin_ticker = self.ticker().to_owned();
         let ctx = self.ctx();
