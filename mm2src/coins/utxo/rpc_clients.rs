@@ -2876,8 +2876,8 @@ macro_rules! handle_connect_err {
     };
 }
 
-#[allow(clippy::too_many_arguments)]
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
 async fn connect_impl<Spawner: SpawnFuture>(
     config: ElectrumConfig,
     addr: String,
@@ -3018,6 +3018,7 @@ async fn connect_impl<Spawner: SpawnFuture>(
 }
 
 #[cfg(target_arch = "wasm32")]
+#[allow(clippy::too_many_arguments)]
 async fn connect_impl<Spawner: SpawnFuture>(
     _config: ElectrumConfig,
     addr: String,
@@ -3072,7 +3073,7 @@ async fn connect_impl<Spawner: SpawnFuture>(
                             }),
                             addr
                         );
-                        electrum_process_json(incoming_json, &responses, scripthash_notification_sender).await;
+                        electrum_process_json(incoming_json, &responses, &scripthash_notification_sender).await;
                     },
                     Err(e) => {
                         error!("{} error: {:?}", addr, e);
