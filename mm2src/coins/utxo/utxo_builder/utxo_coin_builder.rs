@@ -571,7 +571,7 @@ pub trait UtxoCoinBuilderCommonOps {
             servers: servers.clone(),
             coin_ticker,
             negotiate_version: args.negotiate_version,
-            conn_mng_policy: ctx.electrum_conn_mng_policy(),
+            connection_manager_policy: ctx.electrum_connection_manager_policy(),
         };
         let client = ElectrumClient::try_new(
             client_settings,

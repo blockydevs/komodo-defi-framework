@@ -20,7 +20,7 @@ use std::future::Future;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
-use super::ConnMngPolicy;
+use super::ConnectionManagerPolicy;
 
 cfg_wasm32! {
     use mm2_rpc::wasm_rpc::WasmRpcSender;
@@ -329,14 +329,12 @@ impl MmCtx {
 
     pub fn gui(&self) -> Option<&str> { self.conf["gui"].as_str() }
 
-    pub fn electrum_conn_mng_policy(&self) -> ConnMngPolicy {
-        let conn_policy = self.conf["conn_mng_policy"].clone();
-
-        serde_json::from_value(conn_policy.clone())
+    pub fn electrum_connection_manager_policy(&self) -> ConnectionManagerPolicy {
+        serde_json::from_value(self.conf["connection_manager_policy"].clone())
             .map_err(|err| {
                 error!(
                     "Failed to get conn_mng_policy from the value: {:?}, error: {}",
-                    conn_policy, err
+                    &self.conf["connection_manager_policy"], err
                 )
             })
             .unwrap_or_default()

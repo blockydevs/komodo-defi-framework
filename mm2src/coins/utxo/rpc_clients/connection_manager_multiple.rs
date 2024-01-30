@@ -10,23 +10,24 @@ use common::executor::abortable_queue::{AbortableQueue, WeakSpawner};
 use common::executor::{AbortableSystem, SpawnFuture, Timer};
 use common::log::{debug, error, info, warn};
 
-use super::conn_mng_common::{ConnMngError, ConnMngTrait, DEFAULT_CONN_TIMEOUT_SEC, SUSPEND_TIMEOUT_INIT_SEC};
+use super::connection_manager_common::{ConnectionManagerErr, ConnectionManagerTrait, DEFAULT_CONN_TIMEOUT_SEC,
+                                       SUSPEND_TIMEOUT_INIT_SEC};
 use super::{spawn_electrum, ElectrumClientEvent};
 use super::{ElectrumConnSettings, ElectrumConnection};
 
 #[derive(Clone, Debug)]
-pub struct ConnMngMultiple(pub Arc<ConnMngMultipleImpl>);
+pub struct ConnectionManagerMultiple(pub Arc<ConnectionManagerMultipleImpl>);
 
 #[derive(Debug)]
-pub struct ConnMngMultipleImpl {
-    guarded: AsyncMutex<ConnMngMultipleState>,
+pub struct ConnectionManagerMultipleImpl {
+    guarded: AsyncMutex<ConnectionManagerMultipleState>,
     abortable_system: AbortableQueue,
     event_sender: futures::channel::mpsc::UnboundedSender<ElectrumClientEvent>,
     scripthash_notification_sender: ScripthashNotificationSender,
 }
 
 #[derive(Debug)]
-struct ConnMngMultipleState {
+struct ConnectionManagerMultipleState {
     conn_ctxs: Vec<ElectrumConnCtx>,
 }
 
@@ -39,18 +40,23 @@ struct ElectrumConnCtx {
 }
 
 #[async_trait]
-impl ConnMngTrait for ConnMngMultiple {
+impl ConnectionManagerTrait for ConnectionManagerMultiple {
     async fn get_conn(&self) -> Vec<Arc<AsyncMutex<ElectrumConnection>>> { self.0.get_conn().await }
 
-    async fn get_conn_by_address(&self, address: &str) -> Result<Arc<AsyncMutex<ElectrumConnection>>, ConnMngError> {
+    async fn get_conn_by_address(
+        &self,
+        address: &str,
+    ) -> Result<Arc<AsyncMutex<ElectrumConnection>>, ConnectionManagerErr> {
         self.0.get_conn_by_address(address).await
     }
 
-    async fn connect(&self) -> Result<(), ConnMngError> { self.deref().connect().await }
+    async fn connect(&self) -> Result<(), ConnectionManagerErr> { self.deref().connect().await }
 
     async fn is_connected(&self) -> bool { self.0.is_connected().await }
 
-    async fn remove_server(&self, address: &str) -> Result<(), ConnMngError> { self.0.remove_server(address).await }
+    async fn remove_server(&self, address: &str) -> Result<(), ConnectionManagerErr> {
+        self.0.remove_server(address).await
+    }
 
     async fn rotate_servers(&self, no_of_rotations: usize) {
         debug!("Rotate servers: {}", no_of_rotations);
@@ -75,12 +81,12 @@ impl ConnMngTrait for ConnMngMultiple {
     }
 }
 
-impl ConnMngMultiple {
-    async fn connect(&self) -> Result<(), ConnMngError> {
+impl ConnectionManagerMultiple {
+    async fn connect(&self) -> Result<(), ConnectionManagerErr> {
         let mut guarded = self.0.guarded.lock().await;
 
         if guarded.conn_ctxs.is_empty() {
-            return Err(ConnMngError::SettingsNotSet);
+            return Err(ConnectionManagerErr::SettingsNotSet);
         }
 
         for conn_ctx in &mut guarded.conn_ctxs {
@@ -99,7 +105,7 @@ impl ConnMngMultiple {
         Ok(())
     }
 
-    async fn suspend_server(&self, address: String) -> Result<(), ConnMngError> {
+    async fn suspend_server(&self, address: String) -> Result<(), ConnectionManagerErr> {
         debug!(
             "About to suspend connection to addr: {}, guard: {:?}",
             address, self.0.guarded
@@ -134,7 +140,7 @@ impl ConnMngMultiple {
         ));
     }
 
-    async fn resume_server(self, address: String) -> Result<(), ConnMngError> {
+    async fn resume_server(self, address: String) -> Result<(), ConnectionManagerErr> {
         debug!("Resume address: {}", address);
         let guard = self.0.guarded.lock().await;
 
@@ -151,47 +157,47 @@ impl ConnMngMultiple {
     }
 
     fn reset_connection_context(
-        state: &mut MutexGuard<'_, ConnMngMultipleState>,
+        state: &mut MutexGuard<'_, ConnectionManagerMultipleState>,
         address: &str,
         abortable_system: AbortableQueue,
-    ) -> Result<(), ConnMngError> {
+    ) -> Result<(), ConnectionManagerErr> {
         debug!("Reset connection context for: {}", address);
         let (_, conn_ctx) = Self::get_conn_ctx_mut(state, address)?;
         conn_ctx
             .abortable_system
             .abort_all()
-            .map_err(|err| ConnMngError::FailedAbort(address.to_string(), err))?;
+            .map_err(|err| ConnectionManagerErr::FailedAbort(address.to_string(), err))?;
         conn_ctx.connection.take();
         conn_ctx.abortable_system = abortable_system;
         Ok(())
     }
 
     async fn get_suspend_timeout(
-        state: &MutexGuard<'_, ConnMngMultipleState>,
+        state: &MutexGuard<'_, ConnectionManagerMultipleState>,
         address: &str,
-    ) -> Result<u64, ConnMngError> {
+    ) -> Result<u64, ConnectionManagerErr> {
         Self::get_conn_ctx(state, address).map(|(_, conn_ctx)| conn_ctx.suspend_timeout_sec)
     }
 
     fn duplicate_suspend_timeout(
-        state: &mut MutexGuard<'_, ConnMngMultipleState>,
+        state: &mut MutexGuard<'_, ConnectionManagerMultipleState>,
         address: &str,
-    ) -> Result<(), ConnMngError> {
+    ) -> Result<(), ConnectionManagerErr> {
         Self::set_suspend_timeout(state, address, |origin| origin.checked_mul(2).unwrap_or(u64::MAX))
     }
 
     fn reset_suspend_timeout(
-        state: &mut MutexGuard<'_, ConnMngMultipleState>,
+        state: &mut MutexGuard<'_, ConnectionManagerMultipleState>,
         address: &str,
-    ) -> Result<(), ConnMngError> {
+    ) -> Result<(), ConnectionManagerErr> {
         Self::set_suspend_timeout(state, address, |_| SUSPEND_TIMEOUT_INIT_SEC)
     }
 
     fn set_suspend_timeout<F: Fn(u64) -> u64>(
-        state: &mut MutexGuard<'_, ConnMngMultipleState>,
+        state: &mut MutexGuard<'_, ConnectionManagerMultipleState>,
         address: &str,
         method: F,
-    ) -> Result<(), ConnMngError> {
+    ) -> Result<(), ConnectionManagerErr> {
         let conn_ctx = Self::get_conn_ctx_mut(state, address)?;
         let suspend_timeout = &mut conn_ctx.1.suspend_timeout_sec;
         let new_value = method(*suspend_timeout);
@@ -204,34 +210,34 @@ impl ConnMngMultiple {
     }
 
     fn get_conn_ctx<'a>(
-        state: &'a MutexGuard<'a, ConnMngMultipleState>,
+        state: &'a MutexGuard<'a, ConnectionManagerMultipleState>,
         address: &str,
-    ) -> Result<(usize, &'a ElectrumConnCtx), ConnMngError> {
+    ) -> Result<(usize, &'a ElectrumConnCtx), ConnectionManagerErr> {
         state
             .conn_ctxs
             .iter()
             .enumerate()
             .find(|(_, c)| c.conn_settings.url == address)
-            .ok_or_else(|| ConnMngError::UnknownAddress(address.to_string()))
+            .ok_or_else(|| ConnectionManagerErr::UnknownAddress(address.to_string()))
     }
 
     fn get_conn_ctx_mut<'a, 'b>(
-        state: &'a mut MutexGuard<'b, ConnMngMultipleState>,
+        state: &'a mut MutexGuard<'b, ConnectionManagerMultipleState>,
         address: &'_ str,
-    ) -> Result<(usize, &'a mut ElectrumConnCtx), ConnMngError> {
+    ) -> Result<(usize, &'a mut ElectrumConnCtx), ConnectionManagerErr> {
         state
             .conn_ctxs
             .iter_mut()
             .enumerate()
             .find(|(_, ctx)| ctx.conn_settings.url == address)
-            .ok_or_else(|| ConnMngError::UnknownAddress(address.to_string()))
+            .ok_or_else(|| ConnectionManagerErr::UnknownAddress(address.to_string()))
     }
 
     async fn connect_to(
         self,
         conn_settings: ElectrumConnSettings,
         weak_spawner: WeakSpawner,
-    ) -> Result<(), ConnMngError> {
+    ) -> Result<(), ConnectionManagerErr> {
         let (conn, mut conn_ready_receiver) = spawn_electrum(
             &conn_settings,
             weak_spawner.clone(),
@@ -248,28 +254,28 @@ impl ConnMngMultiple {
                 .await
             },
             _ = conn_ready_receiver => {
-                ConnMngMultiple::reset_suspend_timeout(&mut self.0.guarded.lock().await, &address)
+                ConnectionManagerMultiple::reset_suspend_timeout(&mut self.0.guarded.lock().await, &address)
             }
         }
     }
 
     fn register_connection(
-        state: &mut MutexGuard<'_, ConnMngMultipleState>,
+        state: &mut MutexGuard<'_, ConnectionManagerMultipleState>,
         conn: ElectrumConnection,
-    ) -> Result<(), ConnMngError> {
+    ) -> Result<(), ConnectionManagerErr> {
         let (_, conn_ctx) = Self::get_conn_ctx_mut(state, &conn.addr)?;
         conn_ctx.connection.replace(Arc::new(AsyncMutex::new(conn)));
         Ok(())
     }
 }
 
-impl ConnMngMultipleImpl {
+impl ConnectionManagerMultipleImpl {
     pub(super) fn new(
         servers: Vec<ElectrumConnSettings>,
         abortable_system: AbortableQueue,
         event_sender: futures::channel::mpsc::UnboundedSender<ElectrumClientEvent>,
         scripthash_notification_sender: ScripthashNotificationSender,
-    ) -> ConnMngMultipleImpl {
+    ) -> ConnectionManagerMultipleImpl {
         let mut connections: Vec<ElectrumConnCtx> = vec![];
         for conn_settings in servers {
             let subsystem: AbortableQueue = abortable_system.create_subsystem().unwrap();
@@ -282,10 +288,10 @@ impl ConnMngMultipleImpl {
             });
         }
 
-        ConnMngMultipleImpl {
+        ConnectionManagerMultipleImpl {
             abortable_system,
             event_sender,
-            guarded: AsyncMutex::new(ConnMngMultipleState { conn_ctxs: connections }),
+            guarded: AsyncMutex::new(ConnectionManagerMultipleState { conn_ctxs: connections }),
             scripthash_notification_sender,
         }
     }
@@ -299,14 +305,17 @@ impl ConnMngMultipleImpl {
             .collect()
     }
 
-    async fn get_conn_by_address(&self, address: &str) -> Result<Arc<AsyncMutex<ElectrumConnection>>, ConnMngError> {
+    async fn get_conn_by_address(
+        &self,
+        address: &str,
+    ) -> Result<Arc<AsyncMutex<ElectrumConnection>>, ConnectionManagerErr> {
         let guarded = self.guarded.lock().await;
-        let (_, conn_ctx) = ConnMngMultiple::get_conn_ctx(&guarded, address)?;
+        let (_, conn_ctx) = ConnectionManagerMultiple::get_conn_ctx(&guarded, address)?;
         conn_ctx
             .connection
             .as_ref()
             .cloned()
-            .ok_or_else(|| ConnMngError::NotConnected(address.to_string()))
+            .ok_or_else(|| ConnectionManagerErr::NotConnected(address.to_string()))
     }
 
     async fn is_connected(&self) -> bool {
@@ -323,15 +332,15 @@ impl ConnMngMultipleImpl {
         false
     }
 
-    async fn remove_server(&self, address: &str) -> Result<(), ConnMngError> {
+    async fn remove_server(&self, address: &str) -> Result<(), ConnectionManagerErr> {
         debug!("Remove electrum server: {}", address);
         let mut guarded = self.guarded.lock().await;
-        let (i, _) = ConnMngMultiple::get_conn_ctx(&guarded, address)?;
+        let (i, _) = ConnectionManagerMultiple::get_conn_ctx(&guarded, address)?;
         let conn_ctx = guarded.conn_ctxs.remove(i);
         conn_ctx
             .abortable_system
             .abort_all()
-            .map_err(|err| ConnMngError::FailedAbort(address.to_string(), err))?;
+            .map_err(|err| ConnectionManagerErr::FailedAbort(address.to_string(), err))?;
         Ok(())
     }
 

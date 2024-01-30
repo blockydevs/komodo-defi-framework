@@ -26,11 +26,11 @@ impl DbNamespaceId {
 
 #[derive(Clone, Debug, Deserialize, Display, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub enum ConnMngPolicy {
+pub enum ConnectionManagerPolicy {
     Multiple,
     Selective,
 }
 
-impl Default for ConnMngPolicy {
-    fn default() -> Self { ConnMngPolicy::Selective }
+impl Default for ConnectionManagerPolicy {
+    fn default() -> Self { ConnectionManagerPolicy::Selective }
 }

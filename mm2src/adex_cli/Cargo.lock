@@ -732,10 +732,13 @@ name = "db_common"
 version = "0.1.0"
 dependencies = [
  "common",
+ "crossbeam-channel",
+ "futures 0.3.28",
  "hex",
  "log",
  "rusqlite",
  "sql-builder",
+ "tokio",
  "uuid",
 ]
 

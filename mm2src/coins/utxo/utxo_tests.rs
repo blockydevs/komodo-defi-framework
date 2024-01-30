@@ -41,7 +41,7 @@ use futures::channel::mpsc::channel;
 use futures::future::join_all;
 use futures::TryFutureExt;
 use mm2_core::mm_ctx::MmCtxBuilder;
-use mm2_core::ConnMngPolicy;
+use mm2_core::ConnectionManagerPolicy;
 use mm2_number::bigdecimal::{BigDecimal, Signed};
 use mm2_test_helpers::electrums::doc_electrums;
 use mm2_test_helpers::for_tests::{electrum_servers_rpc, mm_ctx_with_custom_db, DOC_ELECTRUM_ADDRS,
@@ -469,7 +469,7 @@ fn test_wait_for_payment_spend_timeout_electrum() {
         servers: vec![],
         coin_ticker: TEST_COIN_NAME.into(),
         negotiate_version: true,
-        conn_mng_policy: ConnMngPolicy::default(),
+        connection_manager_policy: ConnectionManagerPolicy::default(),
     };
     let client = ElectrumClient::try_new(
         client_settings,

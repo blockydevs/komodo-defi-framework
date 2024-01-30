@@ -1,11 +1,9 @@
 #![cfg_attr(target_arch = "wasm32", allow(unused_macros))]
 #![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 
-#[path = "rpc_clients/conn_mng_common.rs"] mod conn_mng_common;
-#[path = "rpc_clients/conn_mng_multiple.rs"]
-mod conn_mng_multiple;
-#[path = "rpc_clients/conn_mng_selective.rs"]
-mod conn_mng_selective;
+mod connection_manager_common;
+mod connection_manager_multiple;
+mod connection_manager_selective;
 
 use crate::utxo::ScripthashNotification;
 use async_trait::async_trait;
@@ -55,14 +53,15 @@ use common::jsonrpc_client::{JsonRpcBatchClient, JsonRpcBatchResponse, JsonRpcCl
                              JsonRpcResponse, JsonRpcResponseEnum, JsonRpcResponseFut, RpcRes};
 use common::log::{debug, error, info, warn};
 use common::{median, now_float, now_ms, now_sec, small_rng, OrdRange};
-use conn_mng_common::{ConnMngError, ConnMngTrait};
-use conn_mng_multiple::{ConnMngMultiple, ConnMngMultipleImpl};
-use conn_mng_selective::{ConnMngSelective, ConnMngSelectiveImpl};
-use mm2_core::ConnMngPolicy;
+use mm2_core::ConnectionManagerPolicy;
 use mm2_err_handle::prelude::*;
 use mm2_number::{BigDecimal, BigInt, MmNumber};
 use mm2_rpc::data::legacy::{ElectrumProtocol, Priority};
 
+use crate::utxo::rpc_clients::connection_manager_common::{ConnectionManagerErr, ConnectionManagerTrait};
+use crate::utxo::rpc_clients::connection_manager_multiple::{ConnectionManagerMultiple, ConnectionManagerMultipleImpl};
+use crate::utxo::rpc_clients::connection_manager_selective::{ConnectionManagerSelective,
+                                                             ConnectionManagerSelectiveImpl};
 use crate::utxo::utxo_block_header_storage::BlockHeaderStorage;
 use crate::utxo::{output_script, sat_from_big_decimal, GetBlockHeaderError, GetConfirmedTxError, GetTxError,
                   GetTxHeightError};
@@ -1479,21 +1478,21 @@ fn spawn_electrum(
     spawner: WeakSpawner,
     event_sender: futures::channel::mpsc::UnboundedSender<ElectrumClientEvent>,
     scripthash_notification_sender: &ScripthashNotificationSender,
-) -> Result<(ElectrumConnection, async_oneshot::Receiver<()>), ConnMngError> {
+) -> Result<(ElectrumConnection, async_oneshot::Receiver<()>), ConnectionManagerErr> {
     let config = match conn_settings.protocol {
         ElectrumProtocol::TCP => ElectrumConfig::TCP,
         ElectrumProtocol::SSL => {
             let uri: Uri = conn_settings.url.parse().map_err(|err: InvalidUri| {
-                ConnMngError::ConnectingError(conn_settings.url.to_string(), err.to_string())
+                ConnectionManagerErr::ConnectingError(conn_settings.url.to_string(), err.to_string())
             })?;
             let host = uri.host().ok_or_else(|| {
-                ConnMngError::ConnectingError(
+                ConnectionManagerErr::ConnectingError(
                     conn_settings.url.to_string(),
                     "Couldn't retrieve host from addr".to_string(),
                 )
             })?;
             DnsNameRef::try_from_ascii_str(host)
-                .map_err(|err| ConnMngError::ConnectingError(conn_settings.url.clone(), err.to_string()))?;
+                .map_err(|err| ConnectionManagerErr::ConnectingError(conn_settings.url.clone(), err.to_string()))?;
 
             ElectrumConfig::SSL {
                 dns_name: host.into(),
@@ -1501,7 +1500,7 @@ fn spawn_electrum(
             }
         },
         ElectrumProtocol::WS | ElectrumProtocol::WSS => {
-            return Err(ConnMngError::ConnectingError(
+            return Err(ConnectionManagerErr::ConnectingError(
                 conn_settings.url.clone(),
                 "'ws' and 'wss' protocols are not supported yet. Consider using 'TCP' or 'SSL'".to_string(),
             ));
@@ -1525,15 +1524,15 @@ fn spawn_electrum(
     spawner: WeakSpawner,
     event_sender: futures::channel::mpsc::UnboundedSender<ElectrumClientEvent>,
     scripthash_notification_sender: &ScripthashNotificationSender,
-) -> Result<(ElectrumConnection, async_oneshot::Receiver<()>), ConnMngError> {
+) -> Result<(ElectrumConnection, async_oneshot::Receiver<()>), ConnectionManagerErr> {
     let mut url = conn_settings.url.clone();
     let uri: Uri = conn_settings
         .url
         .parse()
-        .map_err(|err: InvalidUri| ConnMngError::ConnectingError(url.clone(), err.to_string()))?;
+        .map_err(|err: InvalidUri| ConnectionManagerErr::ConnectingError(url.clone(), err.to_string()))?;
 
     if uri.scheme().is_some() {
-        return Err(ConnMngError::ConnectingError(
+        return Err(ConnectionManagerErr::ConnectingError(
             url,
             "There has not to be a scheme in the url: {}. \
             'ws://' scheme is used by default. \
@@ -1552,7 +1551,7 @@ fn spawn_electrum(
             ElectrumConfig::WSS
         },
         ElectrumProtocol::TCP | ElectrumProtocol::SSL => {
-            return Err(ConnMngError::ConnectingError(
+            return Err(ConnectionManagerErr::ConnectingError(
                 url,
                 "'TCP' and 'SSL' are not supported in a browser. Please use 'WS' or 'WSS' protocols".to_string(),
             ));
@@ -1652,7 +1651,7 @@ impl<K: Clone + Eq + std::hash::Hash, V: Clone> ConcurrentRequestMap<K, V> {
 pub struct ElectrumClientImpl {
     client_name: String,
     coin_ticker: String,
-    conn_mng: Arc<dyn ConnMngTrait + Send + Sync + 'static>,
+    connection_manager: Arc<dyn ConnectionManagerTrait + Send + Sync + 'static>,
     connections: AsyncMutex<Vec<ElectrumConnection>>,
     next_id: AtomicU64,
     protocol_version: OrdRange<f32>,
@@ -1676,7 +1675,7 @@ async fn electrum_request_multi(
     request: JsonRpcRequestEnum,
 ) -> Result<(JsonRpcRemoteAddr, JsonRpcResponseEnum), JsonRpcErrorType> {
     let mut futures = vec![];
-    let connections = client.conn_mng.get_conn().await;
+    let connections = client.connection_manager.get_conn().await;
 
     for (i, connection) in connections.iter().enumerate() {
         let connection = connection.lock().await;
@@ -1728,7 +1727,7 @@ async fn electrum_request_to(
     to_addr: String,
 ) -> Result<(JsonRpcRemoteAddr, JsonRpcResponseEnum), JsonRpcErrorType> {
     let (tx, responses) = {
-        let conn = client.conn_mng.get_conn_by_address(to_addr.as_ref()).await;
+        let conn = client.connection_manager.get_conn_by_address(to_addr.as_ref()).await;
         let conn = conn.map_err(|err| JsonRpcErrorType::Internal(err.to_string()))?;
         let guard = conn.lock().await;
         let connection: &ElectrumConnection = guard.deref();
@@ -1758,25 +1757,27 @@ async fn electrum_request_to(
 impl ElectrumClientImpl {
     pub async fn connect(&self) -> Result<(), String> {
         debug!("electrum_client_impl connect");
-        self.conn_mng.connect().await.map_err(|err| err.to_string())
+        self.connection_manager.connect().await.map_err(|err| err.to_string())
     }
 
     /// Remove an Electrum connection and stop corresponding spawned actor.
     pub async fn remove_server(&self, server_addr: &str) -> Result<(), String> {
-        self.conn_mng
+        self.connection_manager
             .remove_server(server_addr)
             .await
             .map_err(|err| err.to_string())
     }
 
     /// Moves the Electrum servers that fail in a multi request to the end.
-    pub async fn rotate_servers(&self, no_of_rotations: usize) { self.conn_mng.rotate_servers(no_of_rotations).await }
+    pub async fn rotate_servers(&self, no_of_rotations: usize) {
+        self.connection_manager.rotate_servers(no_of_rotations).await
+    }
 
     /// Check if one of the spawned connections is connected.
-    pub async fn is_connected(&self) -> bool { self.conn_mng.is_connected().await }
+    pub async fn is_connected(&self) -> bool { self.connection_manager.is_connected().await }
 
     /// Check if all connections have been removed.
-    pub async fn is_connections_pool_empty(&self) -> bool { self.conn_mng.is_connections_pool_empty().await }
+    pub async fn is_connections_pool_empty(&self) -> bool { self.connection_manager.is_connections_pool_empty().await }
 
     /// Set the protocol version for the specified server.
     pub async fn set_protocol_version(&self, server_addr: &str, version: f32) -> Result<(), String> {
@@ -1785,7 +1786,7 @@ impl ElectrumClientImpl {
             server_addr, version
         );
         let conn = self
-            .conn_mng
+            .connection_manager
             .get_conn_by_address(server_addr)
             .await
             .map_err(|err| err.to_string())?;
@@ -1870,7 +1871,7 @@ pub(super) struct ElectrumClientSettings {
     pub(super) servers: Vec<ElectrumConnSettings>,
     pub(super) coin_ticker: String,
     pub(super) negotiate_version: bool,
-    pub(super) conn_mng_policy: ConnMngPolicy,
+    pub(super) connection_manager_policy: ConnectionManagerPolicy,
 }
 
 impl ElectrumClient {
@@ -1913,7 +1914,7 @@ impl ElectrumClient {
                     info!("Connected")
                 },
                 ElectrumClientEvent::Disconnected { address } => {
-                    self.conn_mng.on_disconnected(&address);
+                    self.connection_manager.on_disconnected(&address);
                     let _ = event_handlers.on_disconnected(&address);
                     info!("Disconnected")
                 },
@@ -1945,14 +1946,14 @@ impl ElectrumClient {
         );
 
         let client_name = self.client_name.clone();
-        let conn_mng = self.conn_mng.clone();
+        let connection_manager = self.connection_manager.clone();
         let negotiate_version = self.negotiate_version;
 
         if !negotiate_version || check_electrum_server_version(self, client_name, address.to_string()).await {
             if conn_ready_notifier.send(()).is_err() {
                 error!("Failed to notify connection is ready: {}", address);
             }
-        } else if let Err(err) = conn_mng.connect().await {
+        } else if let Err(err) = connection_manager.connect().await {
             error!("Failed to reconnect: {}, {}", address, err);
         }
     }
@@ -2601,32 +2602,37 @@ impl ElectrumClientImpl {
         event_sender: futures::channel::mpsc::UnboundedSender<ElectrumClientEvent>,
         scripthash_notification_sender: ScripthashNotificationSender,
     ) -> Result<ElectrumClientImpl, String> {
-        let conn_mng_abortable_system = abortable_system
+        let sub_abortable_system = abortable_system
             .create_subsystem()
-            .map_err(|err| ERRL!("Failed to create conn_mng abortable_system: {}", err))?;
-        debug!("Init conn_mng with settings: {:?}", client_settings);
+            .map_err(|err| ERRL!("Failed to create connection_manager abortable_system: {}", err))?;
+        debug!("Init connection_manager with settings: {:?}", client_settings);
         let mut rng = small_rng();
         let mut servers = client_settings.servers;
         servers.as_mut_slice().shuffle(&mut rng);
-        let conn_mng: Arc<dyn ConnMngTrait + Send + Sync + 'static> = match client_settings.conn_mng_policy {
-            ConnMngPolicy::Selective => Arc::new(ConnMngSelective(Arc::new(ConnMngSelectiveImpl::try_new(
-                servers,
-                conn_mng_abortable_system,
-                event_sender,
-                scripthash_notification_sender.clone(),
-            )?))),
-            ConnMngPolicy::Multiple => Arc::new(ConnMngMultiple(Arc::new(ConnMngMultipleImpl::new(
-                servers,
-                conn_mng_abortable_system,
-                event_sender,
-                scripthash_notification_sender.clone(),
-            )))),
-        };
+        let connection_manager: Arc<dyn ConnectionManagerTrait + Send + Sync + 'static> =
+            match client_settings.connection_manager_policy {
+                ConnectionManagerPolicy::Selective => Arc::new(ConnectionManagerSelective(Arc::new(
+                    ConnectionManagerSelectiveImpl::try_new(
+                        servers,
+                        sub_abortable_system,
+                        event_sender,
+                        scripthash_notification_sender.clone(),
+                    )?,
+                ))),
+                ConnectionManagerPolicy::Multiple => {
+                    Arc::new(ConnectionManagerMultiple(Arc::new(ConnectionManagerMultipleImpl::new(
+                        servers,
+                        sub_abortable_system,
+                        event_sender,
+                        scripthash_notification_sender.clone(),
+                    ))))
+                },
+            };
         let protocol_version = OrdRange::new(1.2, 1.4).unwrap();
         Ok(ElectrumClientImpl {
             client_name: client_settings.client_name,
             coin_ticker: client_settings.coin_ticker,
-            conn_mng,
+            connection_manager,
             connections: AsyncMutex::new(vec![]),
             next_id: 0.into(),
             protocol_version,
