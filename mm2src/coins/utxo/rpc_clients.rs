@@ -90,6 +90,9 @@ cfg_native! {
 pub const NO_TX_ERROR_CODE: &str = "'code': -5";
 const RESPONSE_TOO_LARGE_CODE: i16 = -32600;
 const TX_NOT_FOUND_RETRIES: u8 = 10;
+const BLOCKCHAIN_HEADERS_SUB_ID: &str = "blockchain.headers.subscribe";
+const BLOCKCHAIN_SCRIPTHASH_SUB_ID: &str = "blockchain.scripthash.subscribe";
+const PING_TIMEOUT_SEC: f64 = 30_f64;
 
 pub type AddressesByLabelResult = HashMap<String, AddressPurpose>;
 pub type JsonRpcPendingRequestsShared = Arc<AsyncMutex<JsonRpcPendingRequests>>;
@@ -1837,10 +1840,6 @@ pub(super) enum ElectrumClientEvent {
     },
 }
 
-const BLOCKCHAIN_HEADERS_SUB_ID: &str = "blockchain.headers.subscribe";
-
-const BLOCKCHAIN_SCRIPTHASH_SUB_ID: &str = "blockchain.scripthash.subscribe";
-
 impl UtxoJsonRpcClientInfo for ElectrumClient {
     fn coin_name(&self) -> &str { self.coin_ticker.as_str() }
 }
@@ -1910,13 +1909,13 @@ impl ElectrumClient {
                     conn_ready_notifier,
                 } => {
                     self.on_connected(&address, conn_ready_notifier).await;
-                    let _ = event_handlers.on_connected(address);
-                    info!("Connected")
+                    let _ = event_handlers.on_connected(&address);
+                    info!("{address} Connected")
                 },
                 ElectrumClientEvent::Disconnected { address } => {
                     self.connection_manager.on_disconnected(&address);
                     let _ = event_handlers.on_disconnected(&address);
-                    info!("Disconnected")
+                    info!("{address} Disconnected")
                 },
                 ElectrumClientEvent::IncomingResponse { data_len } => event_handlers.on_incoming_response(data_len),
                 ElectrumClientEvent::OutgoingRequest { data_len } => event_handlers.on_outgoing_request(data_len),
@@ -1927,8 +1926,6 @@ impl ElectrumClient {
     async fn ping_loop(self) {
         loop {
             debug!("ping looop");
-            const PING_TIMEOUT_SEC: f64 = 30_f64;
-            Timer::sleep(PING_TIMEOUT_SEC).await;
             if !self.is_connected().await {
                 continue;
             }
@@ -1936,6 +1933,8 @@ impl ElectrumClient {
             if let Err(e) = self.server_ping().compat().await {
                 error!("Electrum server ping error: {}", e);
             }
+
+            Timer::sleep(PING_TIMEOUT_SEC).await;
         }
     }
 
@@ -1945,15 +1944,12 @@ impl ElectrumClient {
             address
         );
 
-        let client_name = self.client_name.clone();
-        let connection_manager = self.connection_manager.clone();
         let negotiate_version = self.negotiate_version;
-
-        if !negotiate_version || check_electrum_server_version(self, client_name, address.to_string()).await {
+        if !negotiate_version || check_electrum_server_version(self, &self.client_name, address).await {
             if conn_ready_notifier.send(()).is_err() {
                 error!("Failed to notify connection is ready: {}", address);
             }
-        } else if let Err(err) = connection_manager.connect().await {
+        } else if let Err(err) = &self.connection_manager.connect().await {
             error!("Failed to reconnect: {}, {}", address, err);
         }
     }
@@ -2213,9 +2209,9 @@ impl ElectrumClient {
     }
 }
 
-async fn check_electrum_server_version(client: &ElectrumClient, client_name: String, electrum_addr: String) -> bool {
-    async fn remove_server(client: &ElectrumClient, electrum_addr: String) {
-        if let Err(e) = client.remove_server(&electrum_addr).await {
+async fn check_electrum_server_version(client: &ElectrumClient, client_name: &str, electrum_addr: &str) -> bool {
+    async fn remove_server(client: &ElectrumClient, electrum_addr: &str) {
+        if let Err(e) = client.remove_server(electrum_addr).await {
             error!("Error on remove server: {}", e);
         }
     }
@@ -2223,7 +2219,7 @@ async fn check_electrum_server_version(client: &ElectrumClient, client_name: Str
     let protocol_version = client.protocol_version();
     debug!("Check version, supported protocols: {:?}", protocol_version);
     let version = match client
-        .server_version(&electrum_addr, &client_name, protocol_version)
+        .server_version(electrum_addr, client_name, protocol_version)
         .compat()
         .await
     {
@@ -2240,7 +2236,7 @@ async fn check_electrum_server_version(client: &ElectrumClient, client_name: Str
     let actual_version = match version.protocol_version.parse::<f32>() {
         Ok(v) => v,
         Err(e) => {
-            error!("Error on parse protocol_version: {:?}", e);
+            error!("Error while parsing protocol_version: {:?}", e);
             remove_server(client, electrum_addr).await;
             return false;
         },
@@ -2255,9 +2251,9 @@ async fn check_electrum_server_version(client: &ElectrumClient, client_name: Str
         return false;
     }
 
-    match client.set_protocol_version(&electrum_addr, actual_version).await {
+    match client.set_protocol_version(electrum_addr, actual_version).await {
         Ok(()) => info!(
-            "Use protocol version {:?} for Electrum {:?}",
+            "Using protocol version {:?} for Electrum {:?}",
             actual_version, electrum_addr
         ),
         Err(e) => {
@@ -2265,6 +2261,7 @@ async fn check_electrum_server_version(client: &ElectrumClient, client_name: Str
             return false;
         },
     };
+
     true
 }
 
@@ -2604,7 +2601,7 @@ impl ElectrumClientImpl {
     ) -> Result<ElectrumClientImpl, String> {
         let sub_abortable_system = abortable_system
             .create_subsystem()
-            .map_err(|err| ERRL!("Failed to create connection_manager abortable_system: {}", err))?;
+            .map_err(|err| ERRL!("Failed to create connection_manager abortable system: {}", err))?;
         debug!("Init connection_manager with settings: {:?}", client_settings);
         let mut rng = small_rng();
         let mut servers = client_settings.servers;
@@ -2903,6 +2900,7 @@ async fn connect_impl<Spawner: SpawnFuture>(
 
     let socket_addr = handle_connect_err!(addr_to_socket_addr(&addr), addr);
 
+    let mut secure_connection = false;
     let connect_f = match config.clone() {
         ElectrumConfig::TCP => Either::Left(TcpStream::connect(&socket_addr).map_ok(ElectrumStream::Tcp)),
         ElectrumConfig::SSL {
@@ -2912,6 +2910,7 @@ async fn connect_impl<Spawner: SpawnFuture>(
             let tls_connector = if skip_validation {
                 TlsConnector::from(UNSAFE_TLS_CONFIG.clone())
             } else {
+                secure_connection = true;
                 TlsConnector::from(SAFE_TLS_CONFIG.clone())
             };
 
@@ -2927,7 +2926,10 @@ async fn connect_impl<Spawner: SpawnFuture>(
 
     let stream = handle_connect_err!(connect_f.await, addr);
     handle_connect_err!(stream.as_ref().set_nodelay(true), addr);
-    info!("Electrum client connected to {}", addr);
+    match secure_connection {
+        true => info!("Electrum client connected to {} securely", addr),
+        false => info!("Electrum client connected to {}", addr),
+    };
     handle_connect_err!(
         event_sender.unbounded_send(ElectrumClientEvent::Connected {
             address: addr.clone(),

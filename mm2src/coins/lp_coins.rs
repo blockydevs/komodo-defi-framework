@@ -3503,7 +3503,7 @@ pub trait RpcTransportEventHandler {
 
     fn on_incoming_response(&self, data_len: usize);
 
-    fn on_connected(&self, address: String) -> Result<(), String>;
+    fn on_connected(&self, address: &str) -> Result<(), String>;
 
     fn on_disconnected(&self, address: &str) -> Result<(), String>;
 }
@@ -3519,7 +3519,7 @@ impl RpcTransportEventHandler for RpcTransportEventHandlerShared {
 
     fn on_incoming_response(&self, data_len: usize) { self.as_ref().on_incoming_response(data_len) }
 
-    fn on_connected(&self, address: String) -> Result<(), String> { self.as_ref().on_connected(address) }
+    fn on_connected(&self, address: &str) -> Result<(), String> { self.as_ref().on_connected(address) }
 
     fn on_disconnected(&self, address: &str) -> Result<(), String> { self.as_ref().on_disconnected(address) }
 }
@@ -3542,9 +3542,9 @@ impl<T: RpcTransportEventHandler> RpcTransportEventHandler for Vec<T> {
         }
     }
 
-    fn on_connected(&self, address: String) -> Result<(), String> {
+    fn on_connected(&self, address: &str) -> Result<(), String> {
         for handler in self {
-            try_s!(handler.on_connected(address.clone()))
+            try_s!(handler.on_connected(address))
         }
         Ok(())
     }
@@ -3612,7 +3612,7 @@ impl RpcTransportEventHandler for CoinTransportMetrics {
             "coin" => self.ticker.to_owned(), "client" => self.client.to_owned());
     }
 
-    fn on_connected(&self, _address: String) -> Result<(), String> {
+    fn on_connected(&self, _address: &str) -> Result<(), String> {
         // Handle a new connected endpoint if necessary.
         // Now just return the Ok
         Ok(())

@@ -28,7 +28,7 @@ pub struct ConnectionManagerMultipleImpl {
 
 #[derive(Debug)]
 struct ConnectionManagerMultipleState {
-    conn_ctxs: Vec<ElectrumConnCtx>,
+    connection_contexts: Vec<ElectrumConnCtx>,
 }
 
 #[derive(Debug)]
@@ -61,14 +61,14 @@ impl ConnectionManagerTrait for ConnectionManagerMultiple {
     async fn rotate_servers(&self, no_of_rotations: usize) {
         debug!("Rotate servers: {}", no_of_rotations);
         let mut guarded = self.0.guarded.lock().await;
-        guarded.conn_ctxs.rotate_left(no_of_rotations);
+        guarded.connection_contexts.rotate_left(no_of_rotations);
     }
 
     async fn is_connections_pool_empty(&self) -> bool { self.0.is_connections_pool_empty().await }
 
     fn on_disconnected(&self, address: &str) {
         info!(
-            "electrum_conn_mng disconnected from: {}, it will be suspended and trying to reconnect",
+            "electrum_connection_manager disconnected from: {}, it will be suspended and trying to reconnect",
             address
         );
         let self_copy = self.clone();
@@ -85,23 +85,24 @@ impl ConnectionManagerMultiple {
     async fn connect(&self) -> Result<(), ConnectionManagerErr> {
         let mut guarded = self.0.guarded.lock().await;
 
-        if guarded.conn_ctxs.is_empty() {
+        if guarded.connection_contexts.is_empty() {
             return Err(ConnectionManagerErr::SettingsNotSet);
         }
 
-        for conn_ctx in &mut guarded.conn_ctxs {
-            if conn_ctx.connection.is_some() {
-                let address = &conn_ctx.conn_settings.url;
+        for context in &mut guarded.connection_contexts {
+            if context.connection.is_some() {
+                let address = &context.conn_settings.url;
                 warn!("An attempt to connect over an existing one: {}", address);
                 continue;
             }
-            let conn_settings = conn_ctx.conn_settings.clone();
-            let weak_spawner = conn_ctx.abortable_system.weak_spawner();
+            let conn_settings = context.conn_settings.clone();
+            let weak_spawner = context.abortable_system.weak_spawner();
             let self_clone = self.clone();
             self.0.abortable_system.weak_spawner().spawn(async move {
-                let _ = self_clone.connect_to(conn_settings, weak_spawner).await;
+                let _ = self_clone.connect_to(&conn_settings, weak_spawner).await;
             });
         }
+
         Ok(())
     }
 
@@ -149,7 +150,7 @@ impl ConnectionManagerMultiple {
         let conn_spawner = conn_ctx.abortable_system.weak_spawner();
         drop(guard);
 
-        if let Err(err) = self.clone().connect_to(conn_settings, conn_spawner).await {
+        if let Err(err) = self.clone().connect_to(&conn_settings, conn_spawner).await {
             error!("Failed to resume: {}", err);
             self.suspend_server(address.clone()).await?;
         }
@@ -214,7 +215,7 @@ impl ConnectionManagerMultiple {
         address: &str,
     ) -> Result<(usize, &'a ElectrumConnCtx), ConnectionManagerErr> {
         state
-            .conn_ctxs
+            .connection_contexts
             .iter()
             .enumerate()
             .find(|(_, c)| c.conn_settings.url == address)
@@ -226,7 +227,7 @@ impl ConnectionManagerMultiple {
         address: &'_ str,
     ) -> Result<(usize, &'a mut ElectrumConnCtx), ConnectionManagerErr> {
         state
-            .conn_ctxs
+            .connection_contexts
             .iter_mut()
             .enumerate()
             .find(|(_, ctx)| ctx.conn_settings.url == address)
@@ -235,11 +236,11 @@ impl ConnectionManagerMultiple {
 
     async fn connect_to(
         self,
-        conn_settings: ElectrumConnSettings,
+        conn_settings: &ElectrumConnSettings,
         weak_spawner: WeakSpawner,
     ) -> Result<(), ConnectionManagerErr> {
         let (conn, mut conn_ready_receiver) = spawn_electrum(
-            &conn_settings,
+            conn_settings,
             weak_spawner.clone(),
             self.0.event_sender.clone(),
             &self.0.scripthash_notification_sender,
@@ -291,13 +292,15 @@ impl ConnectionManagerMultipleImpl {
         ConnectionManagerMultipleImpl {
             abortable_system,
             event_sender,
-            guarded: AsyncMutex::new(ConnectionManagerMultipleState { conn_ctxs: connections }),
+            guarded: AsyncMutex::new(ConnectionManagerMultipleState {
+                connection_contexts: connections,
+            }),
             scripthash_notification_sender,
         }
     }
 
     async fn get_conn(&self) -> Vec<Arc<AsyncMutex<ElectrumConnection>>> {
-        let connections = &self.guarded.lock().await.conn_ctxs;
+        let connections = &self.guarded.lock().await.connection_contexts;
         connections
             .iter()
             .filter(|conn_ctx| conn_ctx.connection.is_some())
@@ -321,7 +324,7 @@ impl ConnectionManagerMultipleImpl {
     async fn is_connected(&self) -> bool {
         let guarded = self.guarded.lock().await;
 
-        for conn_ctx in guarded.conn_ctxs.iter() {
+        for conn_ctx in guarded.connection_contexts.iter() {
             if let Some(ref connection) = conn_ctx.connection {
                 if connection.lock().await.is_connected().await {
                     return true;
@@ -336,7 +339,7 @@ impl ConnectionManagerMultipleImpl {
         debug!("Remove electrum server: {}", address);
         let mut guarded = self.guarded.lock().await;
         let (i, _) = ConnectionManagerMultiple::get_conn_ctx(&guarded, address)?;
-        let conn_ctx = guarded.conn_ctxs.remove(i);
+        let conn_ctx = guarded.connection_contexts.remove(i);
         conn_ctx
             .abortable_system
             .abort_all()
@@ -344,5 +347,5 @@ impl ConnectionManagerMultipleImpl {
         Ok(())
     }
 
-    async fn is_connections_pool_empty(&self) -> bool { self.guarded.lock().await.conn_ctxs.is_empty() }
+    async fn is_connections_pool_empty(&self) -> bool { self.guarded.lock().await.connection_contexts.is_empty() }
 }

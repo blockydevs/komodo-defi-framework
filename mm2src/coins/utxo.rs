@@ -1390,11 +1390,11 @@ impl RpcTransportEventHandler for ElectrumProtoVerifier {
 
     fn on_incoming_response(&self, _data_len: usize) {}
 
-    fn on_connected(&self, address: String) -> Result<(), String> {
+    fn on_connected(&self, address: &str) -> Result<(), String> {
         debug!("Connected to the electrum server: {}", address);
         try_s!(self
             .on_event_tx
-            .unbounded_send(ElectrumProtoVerifierEvent::Connected(address)));
+            .unbounded_send(ElectrumProtoVerifierEvent::Connected(address.to_string())));
         Ok(())
     }
 

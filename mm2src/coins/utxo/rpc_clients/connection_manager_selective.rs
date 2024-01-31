@@ -27,10 +27,11 @@ pub struct ConnectionManagerSelectiveImpl {
 
 #[derive(Debug)]
 struct ConnectionManagerSelectiveState {
-    connecting: AtomicBool,
-    queue: ConnectionManagerSelectiveQueue,
     active: Option<String>,
-    conn_ctxs: BTreeMap<String, ElectrumConnCtx>,
+    connecting: AtomicBool,
+    connection_contexts: BTreeMap<String, ElectrumConnCtx>,
+    backup_connections: VecDeque<String>,
+    primary_connections: VecDeque<String>,
 }
 
 #[derive(Debug)]
@@ -41,17 +42,11 @@ struct ElectrumConnCtx {
     connection: Option<Arc<AsyncMutex<ElectrumConnection>>>,
 }
 
-#[derive(Debug)]
-struct ConnectionManagerSelectiveQueue {
-    primary: VecDeque<String>,
-    backup: VecDeque<String>,
-}
-
 #[derive(Clone, Debug)]
 pub struct ConnectionManagerSelective(pub Arc<ConnectionManagerSelectiveImpl>);
 
 struct ConnectingAtomicCtx {
-    conn_mng: ConnectionManagerSelective,
+    connection_manager: ConnectionManagerSelective,
     mng_spawner: WeakSpawner,
 }
 
@@ -105,7 +100,7 @@ impl ConnectionManagerTrait for ConnectionManagerSelective {
 
     fn on_disconnected(&self, address: &str) {
         info!(
-            "electrum_conn_mng disconnected from: {}, it will be suspended and trying to reconnect",
+            "electrum_connection_manager disconnected from: {}, it will be suspended and trying to reconnect",
             address
         );
         let self_copy = self.clone();
@@ -138,9 +133,9 @@ impl ConnectionManagerSelective {
             return None
         };
 
-        debug!("Primary electrum nodes to connect: {:?}", guard.queue.primary);
-        debug!("Backup electrum nodes to connect: {:?}", guard.queue.backup);
-        let mut iter = guard.queue.primary.iter().chain(guard.queue.backup.iter());
+        debug!("Primary electrum nodes to connect: {:?}", guard.primary_connections);
+        debug!("Backup electrum nodes to connect: {:?}", guard.backup_connections);
+        let mut iter = guard.primary_connections.iter().chain(guard.backup_connections.iter());
         let addr = iter.next()?.clone();
         if let Ok(conn_ctx) = Self::get_conn_ctx(&guard, &addr) {
             Some((
@@ -168,10 +163,10 @@ impl ConnectionManagerSelective {
 
         match Self::get_conn_ctx(&guard, &address)?.conn_settings.priority {
             Priority::Primary => {
-                guard.queue.primary.pop_front();
+                guard.primary_connections.pop_front();
             },
             Priority::Secondary => {
-                guard.queue.backup.pop_front();
+                guard.backup_connections.pop_front();
             },
         };
 
@@ -208,8 +203,8 @@ impl ConnectionManagerSelective {
         let mut guard = self.0.guarded.lock().await;
         let priority = Self::get_conn_ctx(&guard, &address)?.conn_settings.priority.clone();
         match priority {
-            Priority::Primary => guard.queue.primary.push_back(address.clone()),
-            Priority::Secondary => guard.queue.backup.push_back(address.clone()),
+            Priority::Primary => guard.primary_connections.push_back(address.clone()),
+            Priority::Secondary => guard.backup_connections.push_back(address.clone()),
         }
 
         if let Some(active) = guard.active.clone() {
@@ -342,7 +337,7 @@ impl ConnectionManagerSelective {
         address: &str,
     ) -> Result<&'a ElectrumConnCtx, ConnectionManagerErr> {
         state
-            .conn_ctxs
+            .connection_contexts
             .get(address)
             .ok_or_else(|| ConnectionManagerErr::UnknownAddress(address.to_string()))
     }
@@ -352,7 +347,7 @@ impl ConnectionManagerSelective {
         address: &'_ str,
     ) -> Result<&'a mut ElectrumConnCtx, ConnectionManagerErr> {
         state
-            .conn_ctxs
+            .connection_contexts
             .get_mut(address)
             .ok_or_else(|| ConnectionManagerErr::UnknownAddress(address.to_string()))
     }
@@ -365,13 +360,13 @@ impl ConnectionManagerSelectiveImpl {
         event_sender: futures::channel::mpsc::UnboundedSender<ElectrumClientEvent>,
         scripthash_notification_sender: ScripthashNotificationSender,
     ) -> Result<ConnectionManagerSelectiveImpl, String> {
-        let mut primary = VecDeque::<String>::new();
-        let mut backup = VecDeque::<String>::new();
-        let mut conn_ctxs: BTreeMap<String, ElectrumConnCtx> = BTreeMap::new();
+        let mut primary_connections = VecDeque::<String>::new();
+        let mut backup_connections = VecDeque::<String>::new();
+        let mut connection_contexts: BTreeMap<String, ElectrumConnCtx> = BTreeMap::new();
         for conn_settings in servers {
             match conn_settings.priority {
-                Priority::Primary => primary.push_back(conn_settings.url.clone()),
-                Priority::Secondary => backup.push_back(conn_settings.url.clone()),
+                Priority::Primary => primary_connections.push_back(conn_settings.url.clone()),
+                Priority::Secondary => backup_connections.push_back(conn_settings.url.clone()),
             }
             let conn_abortable_system = abortable_system.create_subsystem().map_err(|err| {
                 ERRL!(
@@ -380,7 +375,7 @@ impl ConnectionManagerSelectiveImpl {
                     err
                 )
             })?;
-            let _ = conn_ctxs.insert(conn_settings.url.clone(), ElectrumConnCtx {
+            let _ = connection_contexts.insert(conn_settings.url.clone(), ElectrumConnCtx {
                 conn_settings,
                 connection: None,
                 abortable_system: conn_abortable_system,
@@ -392,9 +387,10 @@ impl ConnectionManagerSelectiveImpl {
             event_sender,
             guarded: AsyncMutex::new(ConnectionManagerSelectiveState {
                 connecting: AtomicBool::new(false),
-                queue: ConnectionManagerSelectiveQueue { primary, backup },
+                primary_connections,
+                backup_connections,
                 active: None,
-                conn_ctxs,
+                connection_contexts,
             }),
             scripthash_notification_sender,
             abortable_system,
@@ -405,13 +401,13 @@ impl ConnectionManagerSelectiveImpl {
         debug!("Remove server: {}", address);
         let mut guard = self.guarded.lock().await;
         let conn_ctx = guard
-            .conn_ctxs
+            .connection_contexts
             .remove(address)
             .ok_or_else(|| ConnectionManagerErr::UnknownAddress(address.to_string()))?;
 
         match conn_ctx.conn_settings.priority {
-            Priority::Primary => guard.queue.primary.pop_front(),
-            Priority::Secondary => guard.queue.backup.pop_front(),
+            Priority::Primary => guard.primary_connections.pop_front(),
+            Priority::Secondary => guard.backup_connections.pop_front(),
         };
         if let Some(active) = guard.active.as_ref() {
             if active == address {
@@ -432,7 +428,7 @@ impl ConnectionManagerSelectiveImpl {
 
     async fn is_connected(&self) -> bool { self.guarded.lock().await.active.is_some() }
 
-    async fn is_connections_pool_empty(&self) -> bool { self.guarded.lock().await.conn_ctxs.is_empty() }
+    async fn is_connections_pool_empty(&self) -> bool { self.guarded.lock().await.connection_contexts.is_empty() }
 
     async fn get_conn(&self) -> Vec<Arc<AsyncMutex<ElectrumConnection>>> {
         debug!("Getting available connection");
@@ -474,14 +470,17 @@ impl ConnectionManagerSelectiveImpl {
 impl ConnectingAtomicCtx {
     fn try_new(
         guarded: &mut MutexGuard<'_, ConnectionManagerSelectiveState>,
-        conn_mng: ConnectionManagerSelective,
+        connection_manager: ConnectionManagerSelective,
         mng_spawner: WeakSpawner,
     ) -> Option<ConnectingAtomicCtx> {
         match guarded
             .connecting
             .compare_exchange(false, true, AtomicOrdering::Acquire, AtomicOrdering::Relaxed)
         {
-            Ok(false) => Some(Self { conn_mng, mng_spawner }),
+            Ok(false) => Some(Self {
+                connection_manager,
+                mng_spawner,
+            }),
             Err(true) => None,
             _ => panic!("Failed to connect: unexpected state on compare_exchange connecting state"),
         }
@@ -491,9 +490,9 @@ impl ConnectingAtomicCtx {
 impl Drop for ConnectingAtomicCtx {
     fn drop(&mut self) {
         let spawner = self.mng_spawner.clone();
-        let conn_mng = self.conn_mng.clone();
+        let connection_manager = self.connection_manager.clone();
         spawner.spawn(async move {
-            let state = conn_mng.0.guarded.lock().await;
+            let state = connection_manager.0.guarded.lock().await;
             state.connecting.store(false, AtomicOrdering::Relaxed);
         })
     }
