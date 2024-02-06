@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use core::time::Duration;
 use futures::lock::{Mutex as AsyncMutex, MutexGuard};
 use futures::{select, FutureExt};
+use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::Arc;
 
@@ -29,6 +30,7 @@ pub struct ConnectionManagerMultipleImpl {
 #[derive(Debug)]
 struct ConnectionManagerMultipleState {
     connection_contexts: Vec<ElectrumConnCtx>,
+    scripthash_subs: HashMap<String, Arc<AsyncMutex<ElectrumConnection>>>,
 }
 
 #[derive(Debug)]
@@ -66,18 +68,59 @@ impl ConnectionManagerTrait for ConnectionManagerMultiple {
 
     async fn is_connections_pool_empty(&self) -> bool { self.0.is_connections_pool_empty().await }
 
-    fn on_disconnected(&self, address: &str) {
+    async fn on_disconnected(&self, address: &str) {
         info!(
             "electrum_connection_manager disconnected from: {}, it will be suspended and trying to reconnect",
             address
         );
         let self_copy = self.clone();
         let address = address.to_string();
+        // check if any scripthash is subscribed to this addr and remove.
+        self.remove_subscription_by_addr(&address).await;
         self.0.abortable_system.weak_spawner().spawn(async move {
             if let Err(err) = self_copy.clone().suspend_server(address.clone()).await {
                 error!("Failed to suspend server: {}, error: {}", address, err);
             }
         });
+    }
+
+    async fn add_subscription(&self, script_hash: &str) {
+        if let Some(connected) = self.get_connected().await {
+            let mut subs = self.0.guarded.lock().await;
+            subs.scripthash_subs.insert(script_hash.to_string(), connected);
+        };
+    }
+
+    async fn check_script_hash_subscription(&self, script_hash: &str) -> bool {
+        let mut guard = self.0.guarded.lock().await;
+        // Find script_hash connection/subscription
+        if let Some(connection) = guard.scripthash_subs.clone().get(script_hash) {
+            let connection = connection.lock().await;
+            // return true if there's an active connection.
+            if connection.is_connected().await {
+                return true;
+            }
+            //  Proceed to remove subscription if found but not connected/no connection..
+            guard.scripthash_subs.remove(script_hash);
+        };
+
+        false
+    }
+
+    async fn remove_subscription_by_scripthash(&self, script_hash: &str) {
+        let mut guard = self.0.guarded.lock().await;
+        guard.scripthash_subs.remove(script_hash);
+    }
+
+    /// remove scripthash subscription from list by server addr
+    async fn remove_subscription_by_addr(&self, server_addr: &str) {
+        let mut guard = self.0.guarded.lock().await;
+        // remove server from scripthash subscription list
+        for (script, conn) in guard.scripthash_subs.clone() {
+            if conn.lock().await.addr == server_addr {
+                guard.scripthash_subs.remove(&script);
+            }
+        }
     }
 }
 
@@ -268,6 +311,20 @@ impl ConnectionManagerMultiple {
         conn_ctx.connection.replace(Arc::new(AsyncMutex::new(conn)));
         Ok(())
     }
+
+    async fn get_connected(&self) -> Option<Arc<AsyncMutex<ElectrumConnection>>> {
+        let subs = self.0.guarded.lock().await;
+        for connection in subs.connection_contexts.iter() {
+            if let Some(connection) = &connection.connection {
+                let conn = connection.lock().await;
+                if conn.is_connected().await {
+                    return Some(connection.clone());
+                }
+            }
+        }
+
+        None
+    }
 }
 
 impl ConnectionManagerMultipleImpl {
@@ -294,6 +351,7 @@ impl ConnectionManagerMultipleImpl {
             event_sender,
             guarded: AsyncMutex::new(ConnectionManagerMultipleState {
                 connection_contexts: connections,
+                scripthash_subs: HashMap::new(),
             }),
             scripthash_notification_sender,
         }

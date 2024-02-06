@@ -1,17 +1,17 @@
-use async_trait::async_trait;
-use futures::future::FutureExt;
-use futures::lock::{Mutex as AsyncMutex, MutexGuard};
-use futures::select;
-use std::collections::{BTreeMap, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
-use std::sync::Arc;
-use std::time::Duration;
-
 use crate::utxo::ScripthashNotificationSender;
+
+use async_trait::async_trait;
 use common::executor::abortable_queue::{AbortableQueue, WeakSpawner};
 use common::executor::{AbortableSystem, SpawnFuture, Timer};
 use common::log::{debug, error, info, warn};
+use futures::future::FutureExt;
+use futures::lock::{Mutex as AsyncMutex, MutexGuard};
+use futures::select;
 use mm2_rpc::data::legacy::Priority;
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::sync::Arc;
+use std::time::Duration;
 
 use super::connection_manager_common::{ConnectionManagerErr, ConnectionManagerTrait, DEFAULT_CONN_TIMEOUT_SEC,
                                        SUSPEND_TIMEOUT_INIT_SEC};
@@ -32,6 +32,7 @@ struct ConnectionManagerSelectiveState {
     connection_contexts: BTreeMap<String, ElectrumConnCtx>,
     backup_connections: VecDeque<String>,
     primary_connections: VecDeque<String>,
+    scripthash_subs: HashMap<String, Arc<AsyncMutex<ElectrumConnection>>>,
 }
 
 #[derive(Debug)]
@@ -98,13 +99,15 @@ impl ConnectionManagerTrait for ConnectionManagerSelective {
 
     async fn is_connections_pool_empty(&self) -> bool { self.0.is_connections_pool_empty().await }
 
-    fn on_disconnected(&self, address: &str) {
+    async fn on_disconnected(&self, address: &str) {
         info!(
             "electrum_connection_manager disconnected from: {}, it will be suspended and trying to reconnect",
             address
         );
         let self_copy = self.clone();
         let address = address.to_string();
+        // check if any scripthash is subscribed to this addr and remove.
+        self.remove_subscription_by_addr(&address).await;
         self.0.abortable_system.weak_spawner().spawn(async move {
             if let Err(err) = self_copy.clone().suspend_server(address.clone()).await {
                 error!("Failed to suspend server: {}, error: {}", address, err);
@@ -116,6 +119,46 @@ impl ConnectionManagerTrait for ConnectionManagerSelective {
                 );
             }
         });
+    }
+
+    async fn add_subscription(&self, script_hash: &str) {
+        let mut guard = self.0.guarded.lock().await;
+        if let Some(active) = &guard.active {
+            if let Some(conn) = Self::get_conn_ctx(&guard, active).unwrap().connection.clone() {
+                guard.scripthash_subs.insert(script_hash.to_string(), conn);
+            };
+        };
+    }
+
+    async fn check_script_hash_subscription(&self, script_hash: &str) -> bool {
+        let mut guard = self.0.guarded.lock().await;
+        // Find script_hash connection/subscription
+        if let Some(connection) = guard.scripthash_subs.clone().get(script_hash) {
+            let connection = connection.lock().await;
+            if connection.is_connected().await {
+                return true;
+            }
+
+            //  Proceed to remove subscription if found but not connected/no connection..
+            guard.scripthash_subs.remove(script_hash);
+        };
+
+        false
+    }
+
+    async fn remove_subscription_by_scripthash(&self, script_hash: &str) {
+        let mut guard = self.0.guarded.lock().await;
+        guard.scripthash_subs.remove(script_hash);
+    }
+
+    async fn remove_subscription_by_addr(&self, server_addr: &str) {
+        let mut guard = self.0.guarded.lock().await;
+        // remove server from scripthash subscription list
+        for (script, conn) in guard.scripthash_subs.clone() {
+            if conn.lock().await.addr == server_addr {
+                guard.scripthash_subs.remove(&script);
+            }
+        }
     }
 }
 
@@ -391,6 +434,7 @@ impl ConnectionManagerSelectiveImpl {
                 backup_connections,
                 active: None,
                 connection_contexts,
+                scripthash_subs: HashMap::new(),
             }),
             scripthash_notification_sender,
             abortable_system,

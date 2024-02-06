@@ -1,3 +1,12 @@
+use super::utxo_standard::UtxoStandardCoin;
+use crate::utxo::rpc_clients::UtxoRpcClientEnum;
+use crate::{utxo::{output_script,
+                   rpc_clients::electrum_script_hash,
+                   utxo_common::{address_balance, address_to_scripthash},
+                   utxo_tx_history_v2::UtxoTxHistoryOps,
+                   ScripthashNotification, UtxoCoinFields},
+            MarketCoinOps, MmCoin};
+
 use async_trait::async_trait;
 use common::{executor::{AbortSettings, SpawnAbortable, Timer},
              log, Future01CompatExt};
@@ -8,14 +17,6 @@ use mm2_core::mm_ctx::MmArc;
 use mm2_event_stream::{behaviour::{EventBehaviour, EventInitStatus},
                        Event, EventStreamConfiguration};
 use std::collections::{BTreeMap, HashSet};
-
-use super::utxo_standard::UtxoStandardCoin;
-use crate::{utxo::{output_script,
-                   rpc_clients::electrum_script_hash,
-                   utxo_common::{address_balance, address_to_scripthash},
-                   utxo_tx_history_v2::UtxoTxHistoryOps,
-                   ScripthashNotification, UtxoCoinFields},
-            MarketCoinOps, MmCoin};
 
 macro_rules! try_or_continue {
     ($exp:expr) => {
@@ -41,37 +42,62 @@ impl EventBehaviour for UtxoStandardCoin {
             utxo: &UtxoCoinFields,
             addresses: HashSet<Address>,
         ) -> Result<BTreeMap<String, Address>, String> {
-            const LOOP_INTERVAL: f64 = 0.5;
+            match utxo.rpc_client.clone() {
+                UtxoRpcClientEnum::Electrum(client) => {
+                    const LOOP_INTERVAL: f64 = 0.5;
 
-            let mut scripthash_to_address_map: BTreeMap<String, Address> = BTreeMap::new();
-            for address in addresses {
-                let scripthash = address_to_scripthash(&address);
+                    let mut scripthash_to_address_map: BTreeMap<String, Address> = BTreeMap::new();
+                    for address in addresses {
+                        let scripthash = address_to_scripthash(&address);
 
-                scripthash_to_address_map.insert(scripthash.clone(), address);
+                        scripthash_to_address_map.insert(scripthash.clone(), address);
 
-                let mut attempt = 0;
-                while let Err(e) = utxo
-                    .rpc_client
-                    .blockchain_scripthash_subscribe(scripthash.clone())
-                    .compat()
-                    .await
-                {
-                    if attempt == 5 {
-                        return Err(e.to_string());
+                        // Check if we have active subscription and connection for script_hash.
+                        // If found, skip to subscribing next script_hash
+                        if client
+                            .client_impl
+                            .connection_manager
+                            .check_script_hash_subscription(&scripthash)
+                            .await
+                        {
+                            continue;
+                        };
+
+                        let mut attempt = 0;
+                        while let Err(e) = utxo
+                            .rpc_client
+                            .blockchain_scripthash_subscribe(scripthash.clone())
+                            .compat()
+                            .await
+                        {
+                            if attempt == 5 {
+                                return Err(e.to_string());
+                            }
+
+                            log::error!(
+                                "Failed to subscribe {} scripthash ({attempt}/5 attempt). Error: {}",
+                                scripthash,
+                                e.to_string()
+                            );
+
+                            attempt += 1;
+                            Timer::sleep(LOOP_INTERVAL).await;
+                        }
+
+                        // If subscription is successful, add to the list.
+                        client
+                            .client_impl
+                            .connection_manager
+                            .add_subscription(&scripthash)
+                            .await;
                     }
 
-                    log::error!(
-                        "Failed to subscribe {} scripthash ({attempt}/5 attempt). Error: {}",
-                        scripthash,
-                        e.to_string()
-                    );
-
-                    attempt += 1;
-                    Timer::sleep(LOOP_INTERVAL).await;
-                }
+                    Ok(scripthash_to_address_map)
+                },
+                UtxoRpcClientEnum::Native(_) => {
+                    Err("Balance streaming is currently not supported for native client.".to_owned())
+                },
             }
-
-            Ok(scripthash_to_address_map)
         }
 
         let ctx = match MmArc::from_weak(&self.as_ref().ctx) {

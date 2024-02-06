@@ -1654,7 +1654,7 @@ impl<K: Clone + Eq + std::hash::Hash, V: Clone> ConcurrentRequestMap<K, V> {
 pub struct ElectrumClientImpl {
     client_name: String,
     coin_ticker: String,
-    connection_manager: Arc<dyn ConnectionManagerTrait + Send + Sync + 'static>,
+    pub(crate) connection_manager: Arc<dyn ConnectionManagerTrait + Send + Sync + 'static>,
     connections: AsyncMutex<Vec<ElectrumConnection>>,
     next_id: AtomicU64,
     protocol_version: OrdRange<f32>,
@@ -1913,7 +1913,7 @@ impl ElectrumClient {
                     info!("{address} Connected")
                 },
                 ElectrumClientEvent::Disconnected { address } => {
-                    self.connection_manager.on_disconnected(&address);
+                    self.connection_manager.on_disconnected(&address).await;
                     let _ = event_handlers.on_disconnected(&address);
                     info!("{address} Disconnected")
                 },
