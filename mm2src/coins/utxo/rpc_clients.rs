@@ -21,7 +21,7 @@ use http::uri::InvalidUri;
 use http::Uri;
 use itertools::Itertools;
 use keys::hash::H256;
-use keys::{Address, Type as ScriptType};
+use keys::Address;
 #[cfg(test)] use mocktopus::macros::*;
 use rand::seq::SliceRandom;
 use rpc::v1::types::{Bytes as BytesJson, Transaction as RpcTransaction, H256 as H256Json};
