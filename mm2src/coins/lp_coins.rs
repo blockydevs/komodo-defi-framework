@@ -657,6 +657,10 @@ impl TransactionErr {
     }
 }
 
+impl From<keys::Error> for TransactionErr {
+    fn from(e: keys::Error) -> Self { TransactionErr::Plain(e.to_string()) }
+}
+
 #[derive(Debug, PartialEq)]
 pub enum FoundSwapTxSpend {
     Spent(TransactionEnum),
@@ -4259,7 +4263,7 @@ struct ConvertUtxoAddressReq {
 
 pub async fn convert_utxo_address(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
     let req: ConvertUtxoAddressReq = try_s!(json::from_value(req));
-    let mut addr: utxo::Address = try_s!(req.address.parse());
+    let mut addr: utxo::LegacyAddress = try_s!(req.address.parse()); // Only legacy addresses supported as source
     let coin = match lp_coinfind(&ctx, &req.to_coin).await {
         Ok(Some(c)) => c,
         _ => return ERR!("Coin {} is not activated", req.to_coin),
@@ -4268,8 +4272,7 @@ pub async fn convert_utxo_address(ctx: MmArc, req: Json) -> Result<Response<Vec<
         MmCoinEnum::UtxoCoin(utxo) => utxo,
         _ => return ERR!("Coin {} is not utxo", req.to_coin),
     };
-    addr.prefix = coin.as_ref().conf.pub_addr_prefix;
-    addr.t_addr_prefix = coin.as_ref().conf.pub_t_addr_prefix;
+    addr.prefix = coin.as_ref().conf.address_prefixes.p2pkh.clone();
     addr.checksum_type = coin.as_ref().conf.checksum_type;
 
     let response = try_s!(json::to_vec(&json!({
