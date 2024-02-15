@@ -1682,7 +1682,7 @@ async fn electrum_request_multi(
     request: JsonRpcRequestEnum,
 ) -> Result<(JsonRpcRemoteAddr, JsonRpcResponseEnum), JsonRpcErrorType> {
     let mut futures = vec![];
-    let connections = client.connection_manager.get_conn().await;
+    let connections = client.connection_manager.get_connection().await;
 
     for (i, connection) in connections.iter().enumerate() {
         let connection = connection.lock().await;
@@ -1734,7 +1734,10 @@ async fn electrum_request_to(
     to_addr: String,
 ) -> Result<(JsonRpcRemoteAddr, JsonRpcResponseEnum), JsonRpcErrorType> {
     let (tx, responses) = {
-        let conn = client.connection_manager.get_conn_by_address(to_addr.as_ref()).await;
+        let conn = client
+            .connection_manager
+            .get_connection_by_address(to_addr.as_ref())
+            .await;
         let conn = conn.map_err(|err| JsonRpcErrorType::Internal(err.to_string()))?;
         let guard = conn.lock().await;
         let connection: &ElectrumConnection = guard.deref();
@@ -1794,7 +1797,7 @@ impl ElectrumClientImpl {
         );
         let conn = self
             .connection_manager
-            .get_conn_by_address(server_addr)
+            .get_connection_by_address(server_addr)
             .await
             .map_err(|err| err.to_string())?;
         conn.lock().await.set_protocol_version(version).await;
@@ -1898,6 +1901,7 @@ impl ElectrumClient {
         };
         spawner.spawn(client.clone().ping_loop());
         spawner.spawn(client.clone().event_loop(receiver, event_handlers));
+
         Ok(client)
     }
 

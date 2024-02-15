@@ -53,13 +53,13 @@ struct ConnectingAtomicCtx {
 
 #[async_trait]
 impl ConnectionManagerTrait for ConnectionManagerSelective {
-    async fn get_conn(&self) -> Vec<Arc<AsyncMutex<ElectrumConnection>>> { self.0.get_conn().await }
+    async fn get_connection(&self) -> Vec<Arc<AsyncMutex<ElectrumConnection>>> { self.0.get_connection().await }
 
-    async fn get_conn_by_address(
+    async fn get_connection_by_address(
         &self,
         address: &str,
     ) -> Result<Arc<AsyncMutex<ElectrumConnection>>, ConnectionManagerErr> {
-        self.0.get_conn_by_address(address).await
+        self.0.get_connection_by_address(address).await
     }
 
     async fn connect(&self) -> Result<(), ConnectionManagerErr> {
@@ -76,7 +76,7 @@ impl ConnectionManagerTrait for ConnectionManagerSelective {
                 .await
             {
                 Ok(_) => {
-                    ConnectionManagerSelectiveImpl::set_active_conn(&mut self.0.guarded.lock().await, address)?;
+                    ConnectionManagerSelectiveImpl::set_active_connection(&mut self.0.guarded.lock().await, address)?;
                     break;
                 },
                 Err(_) => {
@@ -144,11 +144,6 @@ impl ConnectionManagerTrait for ConnectionManagerSelective {
         };
 
         false
-    }
-
-    async fn remove_subscription_by_scripthash(&self, script_hash: &str) {
-        let mut guard = self.0.guarded.lock().await;
-        guard.scripthash_subs.remove(script_hash);
     }
 
     async fn remove_subscription_by_addr(&self, server_addr: &str) {
@@ -277,7 +272,7 @@ impl ConnectionManagerSelective {
                         &active,
                         self.0.abortable_system.create_subsystem().unwrap(),
                     )?;
-                    ConnectionManagerSelectiveImpl::set_active_conn(&mut guard, address.clone())?;
+                    ConnectionManagerSelectiveImpl::set_active_connection(&mut guard, address.clone())?;
                 }
             }
         } else {
@@ -461,7 +456,7 @@ impl ConnectionManagerSelectiveImpl {
         Ok(())
     }
 
-    fn set_active_conn(
+    fn set_active_connection(
         guard: &mut MutexGuard<'_, ConnectionManagerSelectiveState>,
         address: String,
     ) -> Result<(), ConnectionManagerErr> {
@@ -474,7 +469,7 @@ impl ConnectionManagerSelectiveImpl {
 
     async fn is_connections_pool_empty(&self) -> bool { self.guarded.lock().await.connection_contexts.is_empty() }
 
-    async fn get_conn(&self) -> Vec<Arc<AsyncMutex<ElectrumConnection>>> {
+    async fn get_connection(&self) -> Vec<Arc<AsyncMutex<ElectrumConnection>>> {
         debug!("Getting available connection");
         let guard = self.guarded.lock().await;
         let Some(address) = guard.active.as_ref().cloned() else {
@@ -496,7 +491,7 @@ impl ConnectionManagerSelectiveImpl {
         }
     }
 
-    async fn get_conn_by_address(
+    async fn get_connection_by_address(
         &self,
         address: &str,
     ) -> Result<Arc<AsyncMutex<ElectrumConnection>>, ConnectionManagerErr> {

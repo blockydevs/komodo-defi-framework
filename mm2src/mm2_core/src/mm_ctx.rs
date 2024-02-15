@@ -333,7 +333,7 @@ impl MmCtx {
         serde_json::from_value(self.conf["connection_manager_policy"].clone())
             .map_err(|err| {
                 error!(
-                    "Failed to get conn_mng_policy from the value: {:?}, error: {}",
+                    "Failed to get connection_manager_policy from the value: {:?}, error: {}",
                     &self.conf["connection_manager_policy"], err
                 )
             })
