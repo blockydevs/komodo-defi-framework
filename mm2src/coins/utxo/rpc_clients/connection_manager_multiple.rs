@@ -32,6 +32,27 @@ struct ConnectionManagerMultipleState {
     scripthash_subs: HashMap<String, Arc<AsyncMutex<ElectrumConnection>>>,
 }
 
+impl ConnectionManagerMultipleState {
+    fn get_connection_ctx_mut<'a>(
+        &'a mut self,
+        address: &'_ str,
+    ) -> Result<(usize, &'a mut ElectrumConnCtx), ConnectionManagerErr> {
+        self.connection_contexts
+            .iter_mut()
+            .enumerate()
+            .find(|(_, ctx)| ctx.conn_settings.url == address)
+            .ok_or_else(|| ConnectionManagerErr::UnknownAddress(address.to_string()))
+    }
+
+    fn get_connection_ctx(&self, address: &str) -> Result<(usize, &ElectrumConnCtx), ConnectionManagerErr> {
+        self.connection_contexts
+            .iter()
+            .enumerate()
+            .find(|(_, c)| c.conn_settings.url == address)
+            .ok_or_else(|| ConnectionManagerErr::UnknownAddress(address.to_string()))
+    }
+}
+
 #[derive(Debug)]
 struct ElectrumConnCtx {
     conn_settings: ElectrumConnSettings,
@@ -176,12 +197,12 @@ impl ConnectionManagerMultiple {
 
     async fn resume_server(self, address: &str) -> Result<(), ConnectionManagerErr> {
         debug!("Resume address: {}", address);
-        let guard = self.0.state_guard.lock().await;
+        let state_guard = self.0.state_guard.lock().await;
 
-        let (_, conn_ctx) = Self::get_connection_ctx(&guard, address)?;
+        let (_, conn_ctx) = state_guard.get_connection_ctx(address)?;
         let conn_settings = conn_ctx.conn_settings.clone();
         let conn_spawner = conn_ctx.abortable_system.weak_spawner();
-        drop(guard);
+        drop(state_guard);
 
         if let Err(err) = self.clone().connect_to(&conn_settings, conn_spawner).await {
             error!("Failed to resume: {}", err);
@@ -196,7 +217,7 @@ impl ConnectionManagerMultiple {
         abortable_system: AbortableQueue,
     ) -> Result<(), ConnectionManagerErr> {
         debug!("Reset connection context for: {}", address);
-        let (_, conn_ctx) = Self::get_connection_ctx_mut(state, address)?;
+        let (_, conn_ctx) = state.get_connection_ctx_mut(address)?;
         conn_ctx
             .abortable_system
             .abort_all()
@@ -210,7 +231,9 @@ impl ConnectionManagerMultiple {
         state: &MutexGuard<'_, ConnectionManagerMultipleState>,
         address: &str,
     ) -> Result<u64, ConnectionManagerErr> {
-        Self::get_connection_ctx(state, address).map(|(_, conn_ctx)| conn_ctx.suspend_timeout_sec)
+        state
+            .get_connection_ctx(address)
+            .map(|(_, conn_ctx)| conn_ctx.suspend_timeout_sec)
     }
 
     fn duplicate_suspend_timeout(
@@ -232,7 +255,7 @@ impl ConnectionManagerMultiple {
         address: &str,
         method: F,
     ) -> Result<(), ConnectionManagerErr> {
-        let conn_ctx = Self::get_connection_ctx_mut(state, address)?;
+        let conn_ctx = state.get_connection_ctx_mut(address)?;
         let suspend_timeout = &mut conn_ctx.1.suspend_timeout_sec;
         let new_value = method(*suspend_timeout);
         debug!(
@@ -241,30 +264,6 @@ impl ConnectionManagerMultiple {
         );
         *suspend_timeout = new_value;
         Ok(())
-    }
-
-    fn get_connection_ctx<'a>(
-        state: &'a MutexGuard<'a, ConnectionManagerMultipleState>,
-        address: &str,
-    ) -> Result<(usize, &'a ElectrumConnCtx), ConnectionManagerErr> {
-        state
-            .connection_contexts
-            .iter()
-            .enumerate()
-            .find(|(_, c)| c.conn_settings.url == address)
-            .ok_or_else(|| ConnectionManagerErr::UnknownAddress(address.to_string()))
-    }
-
-    fn get_connection_ctx_mut<'a, 'b>(
-        state: &'a mut MutexGuard<'b, ConnectionManagerMultipleState>,
-        address: &'_ str,
-    ) -> Result<(usize, &'a mut ElectrumConnCtx), ConnectionManagerErr> {
-        state
-            .connection_contexts
-            .iter_mut()
-            .enumerate()
-            .find(|(_, ctx)| ctx.conn_settings.url == address)
-            .ok_or_else(|| ConnectionManagerErr::UnknownAddress(address.to_string()))
     }
 
     async fn connect_to(
@@ -297,7 +296,7 @@ impl ConnectionManagerMultiple {
         state: &mut MutexGuard<'_, ConnectionManagerMultipleState>,
         conn: ElectrumConnection,
     ) -> Result<(), ConnectionManagerErr> {
-        let (_, conn_ctx) = Self::get_connection_ctx_mut(state, &conn.addr)?;
+        let (_, conn_ctx) = state.get_connection_ctx_mut(&conn.addr)?;
         conn_ctx.connection.replace(Arc::new(AsyncMutex::new(conn)));
         Ok(())
     }
@@ -361,7 +360,7 @@ impl ConnectionManagerMultipleImpl {
         address: &str,
     ) -> Result<Arc<AsyncMutex<ElectrumConnection>>, ConnectionManagerErr> {
         let state_guard = self.state_guard.lock().await;
-        let (_, conn_ctx) = ConnectionManagerMultiple::get_connection_ctx(&state_guard, address)?;
+        let (_, conn_ctx) = state_guard.get_connection_ctx(address)?;
         conn_ctx
             .connection
             .as_ref()
@@ -386,7 +385,7 @@ impl ConnectionManagerMultipleImpl {
     async fn remove_server(&self, address: &str) -> Result<(), ConnectionManagerErr> {
         debug!("Remove electrum server: {}", address);
         let mut state_guard = self.state_guard.lock().await;
-        let (i, _) = ConnectionManagerMultiple::get_connection_ctx(&state_guard, address)?;
+        let (i, _) = state_guard.get_connection_ctx(address)?;
         let conn_ctx = state_guard.connection_contexts.remove(i);
         conn_ctx
             .abortable_system
