@@ -68,8 +68,6 @@ pub enum ConnectionManagerErr {
     NotConnected(String),
     #[display(fmt = "Failed to abort abortable system for: {}, error: {}", _0, _1)]
     FailedAbort(String, AbortedError),
-    #[display(fmt = "Failed to abort abortable system - error: {}", _0)]
-    CreateAbortableSystemErr(AbortedError),
     #[display(fmt = "Failed to connect to: {}, error: {}", _0, _1)]
     ConnectingError(String, String),
     #[display(fmt = "No settings to connect to found")]

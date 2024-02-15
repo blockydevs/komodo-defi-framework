@@ -59,9 +59,8 @@ use mm2_number::{BigDecimal, BigInt, MmNumber};
 use mm2_rpc::data::legacy::{ElectrumProtocol, Priority};
 
 use crate::utxo::rpc_clients::connection_manager_common::{ConnectionManagerErr, ConnectionManagerTrait};
-use crate::utxo::rpc_clients::connection_manager_multiple::{ConnectionManagerMultiple, ConnectionManagerMultipleImpl};
-use crate::utxo::rpc_clients::connection_manager_selective::{ConnectionManagerSelective,
-                                                             ConnectionManagerSelectiveImpl};
+use crate::utxo::rpc_clients::connection_manager_multiple::ConnectionManagerMultiple;
+use crate::utxo::rpc_clients::connection_manager_selective::ConnectionManagerSelective;
 use crate::utxo::utxo_block_header_storage::BlockHeaderStorage;
 use crate::utxo::{output_script, sat_from_big_decimal, GetBlockHeaderError, GetConfirmedTxError, GetTxError,
                   GetTxHeightError};
@@ -1658,7 +1657,7 @@ impl<K: Clone + Eq + std::hash::Hash, V: Clone> ConcurrentRequestMap<K, V> {
 pub struct ElectrumClientImpl {
     client_name: String,
     coin_ticker: String,
-    pub(crate) connection_manager: Arc<dyn ConnectionManagerTrait + Send + Sync + 'static>,
+    pub(crate) connection_manager: Arc<dyn Deref<Target = dyn ConnectionManagerTrait + Send + Sync> + Send + Sync>,
     connections: AsyncMutex<Vec<ElectrumConnection>>,
     next_id: AtomicU64,
     protocol_version: OrdRange<f32>,
@@ -2624,24 +2623,20 @@ impl ElectrumClientImpl {
         let mut rng = small_rng();
         let mut servers = client_settings.servers;
         servers.as_mut_slice().shuffle(&mut rng);
-        let connection_manager: Arc<dyn ConnectionManagerTrait + Send + Sync + 'static> =
+        let connection_manager: Arc<dyn Deref<Target = dyn ConnectionManagerTrait + Send + Sync> + Send + Sync> =
             match client_settings.connection_manager_policy {
-                ConnectionManagerPolicy::Selective => Arc::new(ConnectionManagerSelective(Arc::new(
-                    ConnectionManagerSelectiveImpl::try_new(
-                        servers,
-                        sub_abortable_system,
-                        event_sender,
-                        scripthash_notification_sender.clone(),
-                    )?,
-                ))),
-                ConnectionManagerPolicy::Multiple => Arc::new(ConnectionManagerMultiple(Arc::new(try_s!(
-                    ConnectionManagerMultipleImpl::try_new(
-                        servers,
-                        sub_abortable_system,
-                        event_sender,
-                        scripthash_notification_sender.clone(),
-                    )
-                )))),
+                ConnectionManagerPolicy::Selective => Arc::new(ConnectionManagerSelective::try_new(
+                    servers,
+                    sub_abortable_system,
+                    event_sender,
+                    scripthash_notification_sender.clone(),
+                )?),
+                ConnectionManagerPolicy::Multiple => Arc::new(ConnectionManagerMultiple::try_new(
+                    servers,
+                    sub_abortable_system,
+                    event_sender,
+                    scripthash_notification_sender.clone(),
+                )?),
             };
         let protocol_version = OrdRange::new(1.2, 1.4).unwrap();
         Ok(ElectrumClientImpl {
