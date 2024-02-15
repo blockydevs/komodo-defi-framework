@@ -3,7 +3,6 @@ use core::time::Duration;
 use futures::lock::{Mutex as AsyncMutex, MutexGuard};
 use futures::{select, FutureExt};
 use std::collections::HashMap;
-use std::ops::Deref;
 use std::sync::Arc;
 
 use crate::utxo::ScripthashNotificationSender;
@@ -21,7 +20,7 @@ pub struct ConnectionManagerMultiple(pub Arc<ConnectionManagerMultipleImpl>);
 
 #[derive(Debug)]
 pub struct ConnectionManagerMultipleImpl {
-    guarded: AsyncMutex<ConnectionManagerMultipleState>,
+    state_guard: AsyncMutex<ConnectionManagerMultipleState>,
     abortable_system: AbortableQueue,
     event_sender: futures::channel::mpsc::UnboundedSender<ElectrumClientEvent>,
     scripthash_notification_sender: ScripthashNotificationSender,
@@ -52,7 +51,29 @@ impl ConnectionManagerTrait for ConnectionManagerMultiple {
         self.0.get_connection_by_address(address).await
     }
 
-    async fn connect(&self) -> Result<(), ConnectionManagerErr> { self.deref().connect().await }
+    async fn connect(&self) -> Result<(), ConnectionManagerErr> {
+        let mut state_guard = self.0.state_guard.lock().await;
+
+        if state_guard.connection_contexts.is_empty() {
+            return Err(ConnectionManagerErr::SettingsNotSet);
+        }
+
+        for context in &mut state_guard.connection_contexts {
+            if context.connection.is_some() {
+                let address = &context.conn_settings.url;
+                warn!("An attempt to connect over an existing one: {}", address);
+                continue;
+            }
+            let conn_settings = context.conn_settings.clone();
+            let weak_spawner = context.abortable_system.weak_spawner();
+            let self_clone = self.clone();
+            self.0.abortable_system.weak_spawner().spawn(async move {
+                let _ = self_clone.connect_to(&conn_settings, weak_spawner).await;
+            });
+        }
+
+        Ok(())
+    }
 
     async fn is_connected(&self) -> bool { self.0.is_connected().await }
 
@@ -62,8 +83,8 @@ impl ConnectionManagerTrait for ConnectionManagerMultiple {
 
     async fn rotate_servers(&self, no_of_rotations: usize) {
         debug!("Rotate servers: {}", no_of_rotations);
-        let mut guarded = self.0.guarded.lock().await;
-        guarded.connection_contexts.rotate_left(no_of_rotations);
+        let mut state_guard = self.0.state_guard.lock().await;
+        state_guard.connection_contexts.rotate_left(no_of_rotations);
     }
 
     async fn is_connections_pool_empty(&self) -> bool { self.0.is_connections_pool_empty().await }
@@ -87,13 +108,13 @@ impl ConnectionManagerTrait for ConnectionManagerMultiple {
 
     async fn add_subscription(&self, script_hash: &str) {
         if let Some(connected) = self.get_connected().await {
-            let mut subs = self.0.guarded.lock().await;
+            let mut subs = self.0.state_guard.lock().await;
             subs.scripthash_subs.insert(script_hash.to_string(), connected);
         };
     }
 
     async fn check_script_hash_subscription(&self, script_hash: &str) -> bool {
-        let mut guard = self.0.guarded.lock().await;
+        let mut guard = self.0.state_guard.lock().await;
         // Find script_hash connection/subscription
         if let Some(connection) = guard.scripthash_subs.clone().get(script_hash) {
             let connection = connection.lock().await;
@@ -110,7 +131,7 @@ impl ConnectionManagerTrait for ConnectionManagerMultiple {
 
     /// remove scripthash subscription from list by server addr
     async fn remove_subscription_by_addr(&self, server_addr: &str) {
-        let mut guard = self.0.guarded.lock().await;
+        let mut guard = self.0.state_guard.lock().await;
         // remove server from scripthash subscription list
         for (script, conn) in guard.scripthash_subs.clone() {
             if conn.lock().await.addr == server_addr {
@@ -121,36 +142,12 @@ impl ConnectionManagerTrait for ConnectionManagerMultiple {
 }
 
 impl ConnectionManagerMultiple {
-    async fn connect(&self) -> Result<(), ConnectionManagerErr> {
-        let mut guarded = self.0.guarded.lock().await;
-
-        if guarded.connection_contexts.is_empty() {
-            return Err(ConnectionManagerErr::SettingsNotSet);
-        }
-
-        for context in &mut guarded.connection_contexts {
-            if context.connection.is_some() {
-                let address = &context.conn_settings.url;
-                warn!("An attempt to connect over an existing one: {}", address);
-                continue;
-            }
-            let conn_settings = context.conn_settings.clone();
-            let weak_spawner = context.abortable_system.weak_spawner();
-            let self_clone = self.clone();
-            self.0.abortable_system.weak_spawner().spawn(async move {
-                let _ = self_clone.connect_to(&conn_settings, weak_spawner).await;
-            });
-        }
-
-        Ok(())
-    }
-
     async fn suspend_server(&self, address: &str) -> Result<(), ConnectionManagerErr> {
         debug!(
             "About to suspend connection to addr: {}, guard: {:?}",
-            address, self.0.guarded
+            address, self.0.state_guard
         );
-        let mut guard = self.0.guarded.lock().await;
+        let mut guard = self.0.state_guard.lock().await;
 
         Self::reset_connection_context(&mut guard, address, self.0.abortable_system.create_subsystem().unwrap())?;
 
@@ -179,7 +176,7 @@ impl ConnectionManagerMultiple {
 
     async fn resume_server(self, address: &str) -> Result<(), ConnectionManagerErr> {
         debug!("Resume address: {}", address);
-        let guard = self.0.guarded.lock().await;
+        let guard = self.0.state_guard.lock().await;
 
         let (_, conn_ctx) = Self::get_connection_ctx(&guard, address)?;
         let conn_settings = conn_ctx.conn_settings.clone();
@@ -281,7 +278,7 @@ impl ConnectionManagerMultiple {
             self.0.event_sender.clone(),
             &self.0.scripthash_notification_sender,
         )?;
-        Self::register_connection(&mut self.0.guarded.lock().await, conn)?;
+        Self::register_connection(&mut self.0.state_guard.lock().await, conn)?;
         let timeout_sec = conn_settings.timeout_sec.unwrap_or(DEFAULT_CONN_TIMEOUT_SEC);
         let address = conn_settings.url.clone();
         select! {
@@ -291,7 +288,7 @@ impl ConnectionManagerMultiple {
                 .await
             },
             _ = conn_ready_receiver => {
-                ConnectionManagerMultiple::reset_suspend_timeout(&mut self.0.guarded.lock().await, &address)
+                ConnectionManagerMultiple::reset_suspend_timeout(&mut self.0.state_guard.lock().await, &address)
             }
         }
     }
@@ -306,7 +303,7 @@ impl ConnectionManagerMultiple {
     }
 
     async fn get_connected(&self) -> Option<Arc<AsyncMutex<ElectrumConnection>>> {
-        let subs = self.0.guarded.lock().await;
+        let subs = self.0.state_guard.lock().await;
         for connection in subs.connection_contexts.iter() {
             if let Some(connection) = &connection.connection {
                 let conn = connection.lock().await;
@@ -342,7 +339,7 @@ impl ConnectionManagerMultipleImpl {
         ConnectionManagerMultipleImpl {
             abortable_system,
             event_sender,
-            guarded: AsyncMutex::new(ConnectionManagerMultipleState {
+            state_guard: AsyncMutex::new(ConnectionManagerMultipleState {
                 connection_contexts: connections,
                 scripthash_subs: HashMap::new(),
             }),
@@ -351,7 +348,7 @@ impl ConnectionManagerMultipleImpl {
     }
 
     async fn get_connection(&self) -> Vec<Arc<AsyncMutex<ElectrumConnection>>> {
-        let connections = &self.guarded.lock().await.connection_contexts;
+        let connections = &self.state_guard.lock().await.connection_contexts;
         connections
             .iter()
             .filter(|conn_ctx| conn_ctx.connection.is_some())
@@ -363,8 +360,8 @@ impl ConnectionManagerMultipleImpl {
         &self,
         address: &str,
     ) -> Result<Arc<AsyncMutex<ElectrumConnection>>, ConnectionManagerErr> {
-        let guarded = self.guarded.lock().await;
-        let (_, conn_ctx) = ConnectionManagerMultiple::get_connection_ctx(&guarded, address)?;
+        let state_guard = self.state_guard.lock().await;
+        let (_, conn_ctx) = ConnectionManagerMultiple::get_connection_ctx(&state_guard, address)?;
         conn_ctx
             .connection
             .as_ref()
@@ -373,9 +370,9 @@ impl ConnectionManagerMultipleImpl {
     }
 
     async fn is_connected(&self) -> bool {
-        let guarded = self.guarded.lock().await;
+        let state_guard = self.state_guard.lock().await;
 
-        for conn_ctx in guarded.connection_contexts.iter() {
+        for conn_ctx in state_guard.connection_contexts.iter() {
             if let Some(ref connection) = conn_ctx.connection {
                 if connection.lock().await.is_connected().await {
                     return true;
@@ -388,9 +385,9 @@ impl ConnectionManagerMultipleImpl {
 
     async fn remove_server(&self, address: &str) -> Result<(), ConnectionManagerErr> {
         debug!("Remove electrum server: {}", address);
-        let mut guarded = self.guarded.lock().await;
-        let (i, _) = ConnectionManagerMultiple::get_connection_ctx(&guarded, address)?;
-        let conn_ctx = guarded.connection_contexts.remove(i);
+        let mut state_guard = self.state_guard.lock().await;
+        let (i, _) = ConnectionManagerMultiple::get_connection_ctx(&state_guard, address)?;
+        let conn_ctx = state_guard.connection_contexts.remove(i);
         conn_ctx
             .abortable_system
             .abort_all()
@@ -398,5 +395,5 @@ impl ConnectionManagerMultipleImpl {
         Ok(())
     }
 
-    async fn is_connections_pool_empty(&self) -> bool { self.guarded.lock().await.connection_contexts.is_empty() }
+    async fn is_connections_pool_empty(&self) -> bool { self.state_guard.lock().await.connection_contexts.is_empty() }
 }

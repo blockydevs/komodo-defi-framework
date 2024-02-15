@@ -19,7 +19,7 @@ use super::{spawn_electrum, ElectrumClientEvent, ElectrumConnSettings, ElectrumC
 
 #[derive(Debug)]
 pub struct ConnectionManagerSelectiveImpl {
-    guarded: AsyncMutex<ConnectionManagerSelectiveState>,
+    state_guard: AsyncMutex<ConnectionManagerSelectiveState>,
     abortable_system: AbortableQueue,
     event_sender: futures::channel::mpsc::UnboundedSender<ElectrumClientEvent>,
     scripthash_notification_sender: ScripthashNotificationSender,
@@ -76,7 +76,10 @@ impl ConnectionManagerTrait for ConnectionManagerSelective {
                 .await
             {
                 Ok(_) => {
-                    ConnectionManagerSelectiveImpl::set_active_connection(&mut self.0.guarded.lock().await, address)?;
+                    ConnectionManagerSelectiveImpl::set_active_connection(
+                        &mut self.0.state_guard.lock().await,
+                        address,
+                    )?;
                     break;
                 },
                 Err(_) => {
@@ -122,7 +125,7 @@ impl ConnectionManagerTrait for ConnectionManagerSelective {
     }
 
     async fn add_subscription(&self, script_hash: &str) {
-        let mut guard = self.0.guarded.lock().await;
+        let mut guard = self.0.state_guard.lock().await;
         if let Some(active) = &guard.active {
             if let Some(conn) = Self::get_conn_ctx(&guard, active).unwrap().connection.clone() {
                 guard.scripthash_subs.insert(script_hash.to_string(), conn);
@@ -131,7 +134,7 @@ impl ConnectionManagerTrait for ConnectionManagerSelective {
     }
 
     async fn check_script_hash_subscription(&self, script_hash: &str) -> bool {
-        let mut guard = self.0.guarded.lock().await;
+        let mut guard = self.0.state_guard.lock().await;
         // Find script_hash connection/subscription
         if let Some(connection) = guard.scripthash_subs.clone().get(script_hash) {
             let connection = connection.lock().await;
@@ -147,7 +150,7 @@ impl ConnectionManagerTrait for ConnectionManagerSelective {
     }
 
     async fn remove_subscription_by_addr(&self, server_addr: &str) {
-        let mut guard = self.0.guarded.lock().await;
+        let mut guard = self.0.state_guard.lock().await;
         // remove server from scripthash subscription list
         for (script, conn) in guard.scripthash_subs.clone() {
             if conn.lock().await.addr == server_addr {
@@ -159,7 +162,7 @@ impl ConnectionManagerTrait for ConnectionManagerSelective {
 
 impl ConnectionManagerSelective {
     async fn fetch_conn_settings(&self) -> Option<(ElectrumConnSettings, WeakSpawner, ConnectingAtomicCtx)> {
-        let mut guard = self.0.guarded.lock().await;
+        let mut guard = self.0.state_guard.lock().await;
         if guard.active.is_some() {
             warn!("Skip connecting, already connected");
             return None;
@@ -190,9 +193,9 @@ impl ConnectionManagerSelective {
     async fn suspend_server(&self, address: String) -> Result<(), ConnectionManagerErr> {
         debug!(
             "About to suspend connection to addr: {}, guard: {:?}",
-            address, self.0.guarded
+            address, self.0.state_guard
         );
-        let mut guard = self.0.guarded.lock().await;
+        let mut guard = self.0.state_guard.lock().await;
         if let Some(ref active) = guard.active {
             if *active == address {
                 guard.active.take();
@@ -238,7 +241,7 @@ impl ConnectionManagerSelective {
 
     async fn resume_server(self, address: String) -> Result<(), ConnectionManagerErr> {
         debug!("Resume address: {}", address);
-        let mut guard = self.0.guarded.lock().await;
+        let mut guard = self.0.state_guard.lock().await;
         let priority = Self::get_conn_ctx(&guard, &address)?.conn_settings.priority.clone();
         match priority {
             Priority::Primary => guard.primary_connections.push_back(address.clone()),
@@ -266,7 +269,7 @@ impl ConnectionManagerSelective {
                     error!("Failed to resume: {}", err);
                     self.suspend_server(address.clone()).await?;
                 } else {
-                    let mut guard = self.0.guarded.lock().await;
+                    let mut guard = self.0.state_guard.lock().await;
                     Self::reset_connection_context(
                         &mut guard,
                         &active,
@@ -358,7 +361,7 @@ impl ConnectionManagerSelective {
             event_sender,
             scripthash_notification_sender,
         )?;
-        Self::register_connection(&mut self.0.guarded.lock().await, conn)?;
+        Self::register_connection(&mut self.0.state_guard.lock().await, conn)?;
         let timeout_sec = conn_settings.timeout_sec.unwrap_or(DEFAULT_CONN_TIMEOUT_SEC);
 
         select! {
@@ -423,7 +426,7 @@ impl ConnectionManagerSelectiveImpl {
 
         Ok(ConnectionManagerSelectiveImpl {
             event_sender,
-            guarded: AsyncMutex::new(ConnectionManagerSelectiveState {
+            state_guard: AsyncMutex::new(ConnectionManagerSelectiveState {
                 connecting: AtomicBool::new(false),
                 primary_connections,
                 backup_connections,
@@ -438,7 +441,7 @@ impl ConnectionManagerSelectiveImpl {
 
     async fn remove_server(&self, address: &str) -> Result<(), ConnectionManagerErr> {
         debug!("Remove server: {}", address);
-        let mut guard = self.guarded.lock().await;
+        let mut guard = self.state_guard.lock().await;
         let conn_ctx = guard
             .connection_contexts
             .remove(address)
@@ -465,13 +468,13 @@ impl ConnectionManagerSelectiveImpl {
         Ok(())
     }
 
-    async fn is_connected(&self) -> bool { self.guarded.lock().await.active.is_some() }
+    async fn is_connected(&self) -> bool { self.state_guard.lock().await.active.is_some() }
 
-    async fn is_connections_pool_empty(&self) -> bool { self.guarded.lock().await.connection_contexts.is_empty() }
+    async fn is_connections_pool_empty(&self) -> bool { self.state_guard.lock().await.connection_contexts.is_empty() }
 
     async fn get_connection(&self) -> Vec<Arc<AsyncMutex<ElectrumConnection>>> {
         debug!("Getting available connection");
-        let guard = self.guarded.lock().await;
+        let guard = self.state_guard.lock().await;
         let Some(address) = guard.active.as_ref().cloned() else {
             return vec![];
         };
@@ -496,7 +499,7 @@ impl ConnectionManagerSelectiveImpl {
         address: &str,
     ) -> Result<Arc<AsyncMutex<ElectrumConnection>>, ConnectionManagerErr> {
         debug!("Getting connection for address: {:?}", address);
-        let guard = self.guarded.lock().await;
+        let guard = self.state_guard.lock().await;
 
         let conn_ctx = ConnectionManagerSelective::get_conn_ctx(&guard, address)?;
         conn_ctx
@@ -508,11 +511,11 @@ impl ConnectionManagerSelectiveImpl {
 
 impl ConnectingAtomicCtx {
     fn try_new(
-        guarded: &mut MutexGuard<'_, ConnectionManagerSelectiveState>,
+        state_guard: &mut MutexGuard<'_, ConnectionManagerSelectiveState>,
         connection_manager: ConnectionManagerSelective,
         mng_spawner: WeakSpawner,
     ) -> Option<ConnectingAtomicCtx> {
-        match guarded
+        match state_guard
             .connecting
             .compare_exchange(false, true, AtomicOrdering::Acquire, AtomicOrdering::Relaxed)
         {
@@ -531,7 +534,7 @@ impl Drop for ConnectingAtomicCtx {
         let spawner = self.mng_spawner.clone();
         let connection_manager = self.connection_manager.clone();
         spawner.spawn(async move {
-            let state = connection_manager.0.guarded.lock().await;
+            let state = connection_manager.0.state_guard.lock().await;
             state.connecting.store(false, AtomicOrdering::Relaxed);
         })
     }
