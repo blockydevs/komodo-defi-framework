@@ -333,9 +333,7 @@ impl ConnectionManagerMultipleImpl {
 
         for conn_ctx in state_guard.connection_contexts.iter() {
             if let Some(ref connection) = conn_ctx.connection {
-                if connection.lock().await.is_connected().await {
-                    return true;
-                }
+                return connection.lock().await.is_connected().await;
             }
         }
 

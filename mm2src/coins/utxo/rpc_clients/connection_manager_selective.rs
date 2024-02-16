@@ -444,7 +444,21 @@ impl ConnectionManagerSelectiveImpl {
         Ok(())
     }
 
-    async fn is_connected(&self) -> bool { self.state_guard.lock().await.active.is_some() }
+    async fn is_connected(&self) -> bool {
+        let state_guard = self.state_guard.lock().await;
+
+        if let Some(active) = &state_guard.active {
+            if let Some(ElectrumConnCtx {
+                connection: Some(connection),
+                ..
+            }) = state_guard.connection_contexts.get(active)
+            {
+                return connection.lock().await.is_connected().await;
+            }
+        }
+
+        false
+    }
 
     async fn is_connections_pool_empty(&self) -> bool { self.state_guard.lock().await.connection_contexts.is_empty() }
 
