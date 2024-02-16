@@ -38,7 +38,7 @@ impl ConnectionManagerSelective {
         debug!("Backup electrum nodes to connect: {:?}", guard.backup_connections);
         let mut iter = guard.primary_connections.iter().chain(guard.backup_connections.iter());
         let addr = iter.next()?.clone();
-        if let Ok(conn_ctx) = Self::get_conn_ctx(&guard, &addr) {
+        if let Ok(conn_ctx) = guard.get_connection_ctx(&addr) {
             Some((
                 conn_ctx.conn_settings.clone(),
                 conn_ctx.abortable_system.weak_spawner(),
@@ -62,7 +62,7 @@ impl ConnectionManagerSelective {
             }
         }
 
-        match Self::get_conn_ctx(&guard, &address)?.conn_settings.priority {
+        match guard.get_connection_ctx(&address)?.conn_settings.priority {
             Priority::Primary => {
                 guard.primary_connections.pop_front();
             },
@@ -102,15 +102,15 @@ impl ConnectionManagerSelective {
     async fn resume_server(self, address: String) -> Result<(), ConnectionManagerErr> {
         debug!("Resume address: {}", address);
         let mut guard = self.0.state_guard.lock().await;
-        let priority = Self::get_conn_ctx(&guard, &address)?.conn_settings.priority.clone();
+        let priority = guard.get_connection_ctx(&address)?.conn_settings.priority.clone();
         match priority {
             Priority::Primary => guard.primary_connections.push_back(address.clone()),
             Priority::Secondary => guard.backup_connections.push_back(address.clone()),
         }
 
         if let Some(active) = guard.active.clone() {
-            let conn_ctx = Self::get_conn_ctx(&guard, &address)?;
-            let active_ctx = Self::get_conn_ctx(&guard, &active)?;
+            let conn_ctx = guard.get_connection_ctx(&address)?;
+            let active_ctx = guard.get_connection_ctx(&active)?;
             let active_priority = &active_ctx.conn_settings.priority;
             if let (Priority::Secondary, Priority::Primary) = (active_priority, priority) {
                 let conn_settings = conn_ctx.conn_settings.clone();
@@ -152,7 +152,7 @@ impl ConnectionManagerSelective {
     ) -> Result<(), ConnectionManagerErr> {
         debug!("Reset connection context for: {}", address);
 
-        let conn_ctx = Self::get_conn_ctx_mut(state, address)?;
+        let conn_ctx = state.get_connection_ctx_mut(address)?;
         conn_ctx
             .abortable_system
             .abort_all()
@@ -166,7 +166,7 @@ impl ConnectionManagerSelective {
         state: &mut MutexGuard<'_, ConnectionManagerSelectiveState>,
         conn: ElectrumConnection,
     ) -> Result<(), ConnectionManagerErr> {
-        let conn_ctx = Self::get_conn_ctx_mut(state, &conn.addr)?;
+        let conn_ctx = state.get_connection_ctx_mut(&conn.addr)?;
         conn_ctx.connection.replace(Arc::new(AsyncMutex::new(conn)));
         Ok(())
     }
@@ -175,7 +175,7 @@ impl ConnectionManagerSelective {
         state: &MutexGuard<'_, ConnectionManagerSelectiveState>,
         address: &str,
     ) -> Result<u64, ConnectionManagerErr> {
-        Self::get_conn_ctx(state, address).map(|ctx| ctx.suspend_timeout_sec)
+        state.get_connection_ctx(address).map(|ctx| ctx.suspend_timeout_sec)
     }
 
     fn duplicate_suspend_timeout(
@@ -197,7 +197,7 @@ impl ConnectionManagerSelective {
         address: &str,
         method: F,
     ) -> Result<(), ConnectionManagerErr> {
-        let conn_ctx = Self::get_conn_ctx_mut(state, address)?;
+        let conn_ctx = state.get_connection_ctx_mut(address)?;
         let suspend_timeout = &mut conn_ctx.suspend_timeout_sec;
         let new_value = method(*suspend_timeout);
         debug!(
@@ -231,26 +231,6 @@ impl ConnectionManagerSelective {
             },
             _ = conn_ready_receiver => Ok(()) // TODO: handle cancelled
         }
-    }
-
-    fn get_conn_ctx<'a>(
-        state: &'a MutexGuard<'a, ConnectionManagerSelectiveState>,
-        address: &str,
-    ) -> Result<&'a ElectrumConnCtx, ConnectionManagerErr> {
-        state
-            .connection_contexts
-            .get(address)
-            .ok_or_else(|| ConnectionManagerErr::UnknownAddress(address.to_string()))
-    }
-
-    fn get_conn_ctx_mut<'a, 'b>(
-        state: &'a mut MutexGuard<'b, ConnectionManagerSelectiveState>,
-        address: &'_ str,
-    ) -> Result<&'a mut ElectrumConnCtx, ConnectionManagerErr> {
-        state
-            .connection_contexts
-            .get_mut(address)
-            .ok_or_else(|| ConnectionManagerErr::UnknownAddress(address.to_string()))
     }
 }
 
@@ -330,7 +310,7 @@ impl ConnectionManagerTrait for ConnectionManagerSelective {
     async fn add_subscription(&self, script_hash: &str) {
         let mut guard = self.0.state_guard.lock().await;
         if let Some(active) = &guard.active {
-            if let Some(conn) = Self::get_conn_ctx(&guard, active).unwrap().connection.clone() {
+            if let Some(conn) = guard.get_connection_ctx(active).unwrap().connection.clone() {
                 guard.scripthash_subs.insert(script_hash.to_string(), conn);
             };
         };
@@ -469,7 +449,7 @@ impl ConnectionManagerSelectiveImpl {
             return vec![];
         };
 
-        let conn_ctx = match ConnectionManagerSelective::get_conn_ctx(&guard, &address) {
+        let conn_ctx = match guard.get_connection_ctx(address) {
             Ok(conn_ctx) => conn_ctx,
             Err(err) => {
                 error!("{}", err);
@@ -491,7 +471,7 @@ impl ConnectionManagerSelectiveImpl {
         debug!("Getting connection for address: {:?}", address);
         let guard = self.state_guard.lock().await;
 
-        let conn_ctx = ConnectionManagerSelective::get_conn_ctx(&guard, address)?;
+        let conn_ctx = guard.get_connection_ctx(address)?;
         conn_ctx
             .connection
             .clone()
@@ -507,6 +487,20 @@ struct ConnectionManagerSelectiveState {
     backup_connections: VecDeque<String>,
     primary_connections: VecDeque<String>,
     scripthash_subs: HashMap<String, Arc<AsyncMutex<ElectrumConnection>>>,
+}
+
+impl ConnectionManagerSelectiveState {
+    fn get_connection_ctx(&self, address: &str) -> Result<&ElectrumConnCtx, ConnectionManagerErr> {
+        self.connection_contexts
+            .get(address)
+            .ok_or_else(|| ConnectionManagerErr::UnknownAddress(address.to_string()))
+    }
+
+    fn get_connection_ctx_mut(&mut self, address: &'_ str) -> Result<&mut ElectrumConnCtx, ConnectionManagerErr> {
+        self.connection_contexts
+            .get_mut(address)
+            .ok_or_else(|| ConnectionManagerErr::UnknownAddress(address.to_string()))
+    }
 }
 
 struct ConnectingAtomicCtx {

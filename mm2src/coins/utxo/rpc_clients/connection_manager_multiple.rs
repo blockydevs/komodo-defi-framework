@@ -362,10 +362,10 @@ struct ConnectionManagerMultipleState {
 }
 
 impl ConnectionManagerMultipleState {
-    fn get_connection_ctx_mut<'a>(
-        &'a mut self,
+    fn get_connection_ctx_mut(
+        &mut self,
         address: &'_ str,
-    ) -> Result<(usize, &'a mut ElectrumConnCtx), ConnectionManagerErr> {
+    ) -> Result<(usize, &mut ElectrumConnCtx), ConnectionManagerErr> {
         self.connection_contexts
             .iter_mut()
             .enumerate()
