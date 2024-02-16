@@ -2634,14 +2634,14 @@ impl ElectrumClientImpl {
                         scripthash_notification_sender.clone(),
                     )?,
                 ))),
-                ConnectionManagerPolicy::Multiple => {
-                    Arc::new(ConnectionManagerMultiple(Arc::new(ConnectionManagerMultipleImpl::new(
+                ConnectionManagerPolicy::Multiple => Arc::new(ConnectionManagerMultiple(Arc::new(try_s!(
+                    ConnectionManagerMultipleImpl::try_new(
                         servers,
                         sub_abortable_system,
                         event_sender,
                         scripthash_notification_sender.clone(),
-                    ))))
-                },
+                    )
+                )))),
             };
         let protocol_version = OrdRange::new(1.2, 1.4).unwrap();
         Ok(ElectrumClientImpl {

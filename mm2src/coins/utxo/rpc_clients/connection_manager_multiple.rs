@@ -277,15 +277,17 @@ pub struct ConnectionManagerMultipleImpl {
 }
 
 impl ConnectionManagerMultipleImpl {
-    pub(super) fn new(
+    pub(super) fn try_new(
         servers: Vec<ElectrumConnSettings>,
         abortable_system: AbortableQueue,
         event_sender: futures::channel::mpsc::UnboundedSender<ElectrumClientEvent>,
         scripthash_notification_sender: ScripthashNotificationSender,
-    ) -> ConnectionManagerMultipleImpl {
+    ) -> Result<ConnectionManagerMultipleImpl, ConnectionManagerErr> {
         let mut connections: Vec<ElectrumConnCtx> = vec![];
         for conn_settings in servers {
-            let subsystem: AbortableQueue = abortable_system.create_subsystem().unwrap();
+            let subsystem: AbortableQueue = abortable_system
+                .create_subsystem()
+                .map_err(ConnectionManagerErr::CreateAbortableSystemErr)?;
 
             connections.push(ElectrumConnCtx {
                 conn_settings,
@@ -295,7 +297,7 @@ impl ConnectionManagerMultipleImpl {
             });
         }
 
-        ConnectionManagerMultipleImpl {
+        Ok(ConnectionManagerMultipleImpl {
             abortable_system,
             event_sender,
             state_guard: AsyncMutex::new(ConnectionManagerMultipleState {
@@ -303,7 +305,7 @@ impl ConnectionManagerMultipleImpl {
                 scripthash_subs: HashMap::new(),
             }),
             scripthash_notification_sender,
-        }
+        })
     }
 
     async fn get_connection(&self) -> Vec<Arc<AsyncMutex<ElectrumConnection>>> {
