@@ -28,8 +28,7 @@ impl ConnectionManagerMultiple {
 
         Self::reset_connection_context(&mut guard, address, self.0.abortable_system.create_subsystem().unwrap())?;
 
-        let suspend_timeout_sec = Self::get_suspend_timeout(&guard, address).await?;
-        Self::duplicate_suspend_timeout(&mut guard, address)?;
+        let suspend_timeout_sec = Self::get_and_duplicate_suspend_timeout(&mut guard, address).await?;
         drop(guard);
 
         self.clone().spawn_resume_server(address, suspend_timeout_sec);
@@ -83,20 +82,16 @@ impl ConnectionManagerMultiple {
         Ok(())
     }
 
-    async fn get_suspend_timeout(
-        state: &MutexGuard<'_, ConnectionManagerMultipleState>,
-        address: &str,
-    ) -> Result<u64, ConnectionManagerErr> {
-        state
-            .get_connection_ctx(address)
-            .map(|(_, conn_ctx)| conn_ctx.suspend_timeout_sec)
-    }
-
-    fn duplicate_suspend_timeout(
+    async fn get_and_duplicate_suspend_timeout(
         state: &mut MutexGuard<'_, ConnectionManagerMultipleState>,
         address: &str,
-    ) -> Result<(), ConnectionManagerErr> {
-        Self::set_suspend_timeout(state, address, |origin| origin.checked_mul(2).unwrap_or(u64::MAX))
+    ) -> Result<u64, ConnectionManagerErr> {
+        let timeout = state
+            .get_connection_ctx(address)
+            .map(|(_, conn_ctx)| conn_ctx.suspend_timeout_sec)?;
+        Self::set_suspend_timeout(state, address, |origin| origin.checked_mul(2).unwrap_or(u64::MAX))?;
+
+        Ok(timeout)
     }
 
     fn reset_suspend_timeout(

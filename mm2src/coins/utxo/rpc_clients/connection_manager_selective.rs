@@ -8,7 +8,7 @@ use futures::future::FutureExt;
 use futures::lock::{Mutex as AsyncMutex, MutexGuard};
 use futures::select;
 use mm2_rpc::data::legacy::Priority;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -379,7 +379,7 @@ impl ConnectionManagerSelectiveImpl {
     ) -> Result<ConnectionManagerSelectiveImpl, String> {
         let mut primary_connections = VecDeque::<String>::new();
         let mut backup_connections = VecDeque::<String>::new();
-        let mut connection_contexts: BTreeMap<String, ElectrumConnCtx> = BTreeMap::new();
+        let mut connection_contexts = HashMap::new();
         for conn_settings in servers {
             match conn_settings.priority {
                 Priority::Primary => primary_connections.push_back(conn_settings.url.clone()),
@@ -451,7 +451,7 @@ impl ConnectionManagerSelectiveImpl {
     async fn get_connection(&self) -> Vec<Arc<AsyncMutex<ElectrumConnection>>> {
         debug!("Getting available connection");
         let guard = self.state_guard.lock().await;
-        let Some(address) = guard.active.as_ref().cloned() else {
+        let Some(address) = guard.active.as_ref() else {
             return vec![];
         };
 
@@ -489,7 +489,7 @@ impl ConnectionManagerSelectiveImpl {
 struct ConnectionManagerSelectiveState {
     active: Option<String>,
     connecting: AtomicBool,
-    connection_contexts: BTreeMap<String, ElectrumConnCtx>,
+    connection_contexts: HashMap<String, ElectrumConnCtx>,
     backup_connections: VecDeque<String>,
     primary_connections: VecDeque<String>,
     scripthash_subs: HashMap<String, Arc<AsyncMutex<ElectrumConnection>>>,
