@@ -1,11 +1,20 @@
 use async_trait::async_trait;
+use common::executor::abortable_queue::AbortableQueue;
 use common::executor::AbortedError;
 use derive_more::Display;
 use futures::lock::Mutex as AsyncMutex;
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use super::ElectrumConnection;
+use super::{ElectrumConnSettings, ElectrumConnection};
+
+#[derive(Debug)]
+pub(crate) struct ElectrumConnCtx {
+    pub(crate) conn_settings: ElectrumConnSettings,
+    pub(crate) abortable_system: AbortableQueue,
+    pub(crate) suspend_timeout_sec: u64,
+    pub(crate) connection: Option<Arc<AsyncMutex<ElectrumConnection>>>,
+}
 
 /// Trait provides a common interface to get an `ElectrumConnection` from the `ElectrumClient` instance
 #[async_trait]

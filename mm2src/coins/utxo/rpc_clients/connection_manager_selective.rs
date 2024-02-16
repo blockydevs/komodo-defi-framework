@@ -13,152 +13,12 @@ use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::connection_manager_common::{ConnectionManagerErr, ConnectionManagerTrait, DEFAULT_CONN_TIMEOUT_SEC,
-                                       SUSPEND_TIMEOUT_INIT_SEC};
+use super::connection_manager_common::{ConnectionManagerErr, ConnectionManagerTrait, ElectrumConnCtx,
+                                       DEFAULT_CONN_TIMEOUT_SEC, SUSPEND_TIMEOUT_INIT_SEC};
 use super::{spawn_electrum, ElectrumClientEvent, ElectrumConnSettings, ElectrumConnection};
-
-#[derive(Debug)]
-pub struct ConnectionManagerSelectiveImpl {
-    state_guard: AsyncMutex<ConnectionManagerSelectiveState>,
-    abortable_system: AbortableQueue,
-    event_sender: futures::channel::mpsc::UnboundedSender<ElectrumClientEvent>,
-    scripthash_notification_sender: ScripthashNotificationSender,
-}
-
-#[derive(Debug)]
-struct ConnectionManagerSelectiveState {
-    active: Option<String>,
-    connecting: AtomicBool,
-    connection_contexts: BTreeMap<String, ElectrumConnCtx>,
-    backup_connections: VecDeque<String>,
-    primary_connections: VecDeque<String>,
-    scripthash_subs: HashMap<String, Arc<AsyncMutex<ElectrumConnection>>>,
-}
-
-#[derive(Debug)]
-struct ElectrumConnCtx {
-    conn_settings: ElectrumConnSettings,
-    abortable_system: AbortableQueue,
-    suspend_timeout_sec: u64,
-    connection: Option<Arc<AsyncMutex<ElectrumConnection>>>,
-}
 
 #[derive(Clone, Debug)]
 pub struct ConnectionManagerSelective(pub Arc<ConnectionManagerSelectiveImpl>);
-
-struct ConnectingAtomicCtx {
-    connection_manager: ConnectionManagerSelective,
-    mng_spawner: WeakSpawner,
-}
-
-#[async_trait]
-impl ConnectionManagerTrait for ConnectionManagerSelective {
-    async fn get_connection(&self) -> Vec<Arc<AsyncMutex<ElectrumConnection>>> { self.0.get_connection().await }
-
-    async fn get_connection_by_address(
-        &self,
-        address: &str,
-    ) -> Result<Arc<AsyncMutex<ElectrumConnection>>, ConnectionManagerErr> {
-        self.0.get_connection_by_address(address).await
-    }
-
-    async fn connect(&self) -> Result<(), ConnectionManagerErr> {
-        while let Some((conn_settings, weak_spawner, _connecting_state_ctx)) = self.fetch_conn_settings().await {
-            debug!("Got conn_settings to connect to: {:?}", conn_settings);
-            let address = conn_settings.url.clone();
-            match self
-                .connect_to(
-                    conn_settings,
-                    weak_spawner,
-                    self.0.event_sender.clone(),
-                    &self.0.scripthash_notification_sender,
-                )
-                .await
-            {
-                Ok(_) => {
-                    ConnectionManagerSelectiveImpl::set_active_connection(
-                        &mut self.0.state_guard.lock().await,
-                        address,
-                    )?;
-                    break;
-                },
-                Err(_) => {
-                    self.clone().suspend_server(address.clone()).await?;
-                },
-            };
-        }
-        Ok(())
-    }
-
-    async fn is_connected(&self) -> bool { self.0.is_connected().await }
-
-    async fn remove_server(&self, address: &str) -> Result<(), ConnectionManagerErr> {
-        self.0.remove_server(address).await
-    }
-
-    async fn rotate_servers(&self, _no_of_rotations: usize) {
-        // not implemented for the conn mng selective
-    }
-
-    async fn is_connections_pool_empty(&self) -> bool { self.0.is_connections_pool_empty().await }
-
-    async fn on_disconnected(&self, address: &str) {
-        info!(
-            "electrum_connection_manager disconnected from: {}, it will be suspended and trying to reconnect",
-            address
-        );
-        let self_copy = self.clone();
-        let address = address.to_string();
-        // check if any scripthash is subscribed to this addr and remove.
-        self.remove_subscription_by_addr(&address).await;
-        self.0.abortable_system.weak_spawner().spawn(async move {
-            if let Err(err) = self_copy.clone().suspend_server(address.clone()).await {
-                error!("Failed to suspend server: {}, error: {}", address, err);
-            }
-            if let Err(err) = self_copy.connect().await {
-                error!(
-                    "Failed to reconnect after addr was disconnected: {}, error: {}",
-                    address, err
-                );
-            }
-        });
-    }
-
-    async fn add_subscription(&self, script_hash: &str) {
-        let mut guard = self.0.state_guard.lock().await;
-        if let Some(active) = &guard.active {
-            if let Some(conn) = Self::get_conn_ctx(&guard, active).unwrap().connection.clone() {
-                guard.scripthash_subs.insert(script_hash.to_string(), conn);
-            };
-        };
-    }
-
-    async fn check_script_hash_subscription(&self, script_hash: &str) -> bool {
-        let mut guard = self.0.state_guard.lock().await;
-        // Find script_hash connection/subscription
-        if let Some(connection) = guard.scripthash_subs.clone().get(script_hash) {
-            let connection = connection.lock().await;
-            if connection.is_connected().await {
-                return true;
-            }
-
-            //  Proceed to remove subscription if found but not connected/no connection..
-            guard.scripthash_subs.remove(script_hash);
-        };
-
-        false
-    }
-
-    async fn remove_subscription_by_addr(&self, server_addr: &str) {
-        let mut guard = self.0.state_guard.lock().await;
-        // remove server from scripthash subscription list
-        for (script, conn) in guard.scripthash_subs.clone() {
-            if conn.lock().await.addr == server_addr {
-                guard.scripthash_subs.remove(&script);
-            }
-        }
-    }
-}
 
 impl ConnectionManagerSelective {
     async fn fetch_conn_settings(&self) -> Option<(ElectrumConnSettings, WeakSpawner, ConnectingAtomicCtx)> {
@@ -394,6 +254,122 @@ impl ConnectionManagerSelective {
     }
 }
 
+#[async_trait]
+impl ConnectionManagerTrait for ConnectionManagerSelective {
+    async fn get_connection(&self) -> Vec<Arc<AsyncMutex<ElectrumConnection>>> { self.0.get_connection().await }
+
+    async fn get_connection_by_address(
+        &self,
+        address: &str,
+    ) -> Result<Arc<AsyncMutex<ElectrumConnection>>, ConnectionManagerErr> {
+        self.0.get_connection_by_address(address).await
+    }
+
+    async fn connect(&self) -> Result<(), ConnectionManagerErr> {
+        while let Some((conn_settings, weak_spawner, _connecting_state_ctx)) = self.fetch_conn_settings().await {
+            debug!("Got conn_settings to connect to: {:?}", conn_settings);
+            let address = conn_settings.url.clone();
+            match self
+                .connect_to(
+                    conn_settings,
+                    weak_spawner,
+                    self.0.event_sender.clone(),
+                    &self.0.scripthash_notification_sender,
+                )
+                .await
+            {
+                Ok(_) => {
+                    ConnectionManagerSelectiveImpl::set_active_connection(
+                        &mut self.0.state_guard.lock().await,
+                        address,
+                    )?;
+                    break;
+                },
+                Err(_) => {
+                    self.clone().suspend_server(address.clone()).await?;
+                },
+            };
+        }
+        Ok(())
+    }
+
+    async fn is_connected(&self) -> bool { self.0.is_connected().await }
+
+    async fn remove_server(&self, address: &str) -> Result<(), ConnectionManagerErr> {
+        self.0.remove_server(address).await
+    }
+
+    async fn rotate_servers(&self, _no_of_rotations: usize) {
+        // not implemented for the conn mng selective
+    }
+
+    async fn is_connections_pool_empty(&self) -> bool { self.0.is_connections_pool_empty().await }
+
+    async fn on_disconnected(&self, address: &str) {
+        info!(
+            "electrum_connection_manager disconnected from: {}, it will be suspended and trying to reconnect",
+            address
+        );
+        let self_copy = self.clone();
+        let address = address.to_string();
+        // check if any scripthash is subscribed to this addr and remove.
+        self.remove_subscription_by_addr(&address).await;
+        self.0.abortable_system.weak_spawner().spawn(async move {
+            if let Err(err) = self_copy.clone().suspend_server(address.clone()).await {
+                error!("Failed to suspend server: {}, error: {}", address, err);
+            }
+            if let Err(err) = self_copy.connect().await {
+                error!(
+                    "Failed to reconnect after addr was disconnected: {}, error: {}",
+                    address, err
+                );
+            }
+        });
+    }
+
+    async fn add_subscription(&self, script_hash: &str) {
+        let mut guard = self.0.state_guard.lock().await;
+        if let Some(active) = &guard.active {
+            if let Some(conn) = Self::get_conn_ctx(&guard, active).unwrap().connection.clone() {
+                guard.scripthash_subs.insert(script_hash.to_string(), conn);
+            };
+        };
+    }
+
+    async fn check_script_hash_subscription(&self, script_hash: &str) -> bool {
+        let mut guard = self.0.state_guard.lock().await;
+        // Find script_hash connection/subscription
+        if let Some(connection) = guard.scripthash_subs.clone().get(script_hash) {
+            let connection = connection.lock().await;
+            if connection.is_connected().await {
+                return true;
+            }
+
+            //  Proceed to remove subscription if found but not connected/no connection..
+            guard.scripthash_subs.remove(script_hash);
+        };
+
+        false
+    }
+
+    async fn remove_subscription_by_addr(&self, server_addr: &str) {
+        let mut guard = self.0.state_guard.lock().await;
+        // remove server from scripthash subscription list
+        for (script, conn) in guard.scripthash_subs.clone() {
+            if conn.lock().await.addr == server_addr {
+                guard.scripthash_subs.remove(&script);
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct ConnectionManagerSelectiveImpl {
+    state_guard: AsyncMutex<ConnectionManagerSelectiveState>,
+    abortable_system: AbortableQueue,
+    event_sender: futures::channel::mpsc::UnboundedSender<ElectrumClientEvent>,
+    scripthash_notification_sender: ScripthashNotificationSender,
+}
 impl ConnectionManagerSelectiveImpl {
     pub(super) fn try_new(
         servers: Vec<ElectrumConnSettings>,
@@ -509,6 +485,20 @@ impl ConnectionManagerSelectiveImpl {
     }
 }
 
+#[derive(Debug)]
+struct ConnectionManagerSelectiveState {
+    active: Option<String>,
+    connecting: AtomicBool,
+    connection_contexts: BTreeMap<String, ElectrumConnCtx>,
+    backup_connections: VecDeque<String>,
+    primary_connections: VecDeque<String>,
+    scripthash_subs: HashMap<String, Arc<AsyncMutex<ElectrumConnection>>>,
+}
+
+struct ConnectingAtomicCtx {
+    connection_manager: ConnectionManagerSelective,
+    mng_spawner: WeakSpawner,
+}
 impl ConnectingAtomicCtx {
     fn try_new(
         state_guard: &mut MutexGuard<'_, ConnectionManagerSelectiveState>,
