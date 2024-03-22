@@ -7,7 +7,8 @@ mod connection_manager_selective;
 
 use crate::utxo::ScripthashNotification;
 use async_trait::async_trait;
-use chain::{BlockHeader, BlockHeaderBits, BlockHeaderNonce, OutPoint, Transaction as UtxoTx};
+use chain::{BlockHeader, BlockHeaderBits, BlockHeaderNonce, OutPoint, Transaction as UtxoTx, TransactionInput,
+            TxHashAlgo};
 use derive_more::Display;
 use futures::channel::oneshot as async_oneshot;
 use futures::compat::{Future01CompatExt, Stream01CompatExt};
@@ -294,12 +295,14 @@ pub enum BlockHashOrHeight {
 
 #[derive(Debug, PartialEq)]
 pub struct SpentOutputInfo {
-    // The transaction spending the output
-    pub spending_tx: UtxoTx,
-    // The input index that spends the output
+    /// The input that spends the output
+    pub input: TransactionInput,
+    /// The index of spending input
     pub input_index: usize,
-    // The block hash or height the includes the spending transaction
-    // For electrum clients the block height will be returned, for native clients the block hash will be returned
+    /// The transaction spending the output
+    pub spending_tx: UtxoTx,
+    /// The block hash or height the includes the spending transaction
+    /// For electrum clients the block height will be returned, for native clients the block hash will be returned
     pub spent_in_block: BlockHashOrHeight,
 }
 
@@ -417,6 +420,7 @@ pub trait UtxoRpcClientOps: fmt::Debug + Send + Sync + 'static {
         script_pubkey: &[u8],
         vout: usize,
         from_block: BlockHashOrHeight,
+        tx_hash_algo: TxHashAlgo,
     ) -> Box<dyn Future<Item = Option<SpentOutputInfo>, Error = String> + Send>;
 
     /// Get median time past for `count` blocks in the past including `starting_block`
@@ -926,6 +930,7 @@ impl UtxoRpcClientOps for NativeClient {
         _script_pubkey: &[u8],
         vout: usize,
         from_block: BlockHashOrHeight,
+        tx_hash_algo: TxHashAlgo,
     ) -> Box<dyn Future<Item = Option<SpentOutputInfo>, Error = String> + Send> {
         let selfi = self.clone();
         let fut = async move {
@@ -940,14 +945,17 @@ impl UtxoRpcClientOps for NativeClient {
                 .filter(|tx| !tx.is_conflicting())
             {
                 let maybe_spend_tx_bytes = try_s!(selfi.get_raw_transaction_bytes(&transaction.txid).compat().await);
-                let maybe_spend_tx: UtxoTx =
+                let mut maybe_spend_tx: UtxoTx =
                     try_s!(deserialize(maybe_spend_tx_bytes.as_slice()).map_err(|e| ERRL!("{:?}", e)));
+                maybe_spend_tx.tx_hash_algo = tx_hash_algo;
+                drop_mutability!(maybe_spend_tx);
 
                 for (index, input) in maybe_spend_tx.inputs.iter().enumerate() {
                     if input.previous_output.hash == tx_hash && input.previous_output.index == vout as u32 {
                         return Ok(Some(SpentOutputInfo {
-                            spending_tx: maybe_spend_tx,
+                            input: input.clone(),
                             input_index: index,
+                            spending_tx: maybe_spend_tx,
                             spent_in_block: BlockHashOrHeight::Hash(transaction.blockhash),
                         }));
                     }
@@ -2542,6 +2550,7 @@ impl UtxoRpcClientOps for ElectrumClient {
         script_pubkey: &[u8],
         vout: usize,
         _from_block: BlockHashOrHeight,
+        tx_hash_algo: TxHashAlgo,
     ) -> Box<dyn Future<Item = Option<SpentOutputInfo>, Error = String> + Send> {
         let selfi = self.clone();
         let script_hash = hex::encode(electrum_script_hash(script_pubkey));
@@ -2555,13 +2564,17 @@ impl UtxoRpcClientOps for ElectrumClient {
             for item in history.iter() {
                 let transaction = try_s!(selfi.get_transaction_bytes(&item.tx_hash).compat().await);
 
-                let maybe_spend_tx: UtxoTx = try_s!(deserialize(transaction.as_slice()).map_err(|e| ERRL!("{:?}", e)));
+                let mut maybe_spend_tx: UtxoTx =
+                    try_s!(deserialize(transaction.as_slice()).map_err(|e| ERRL!("{:?}", e)));
+                maybe_spend_tx.tx_hash_algo = tx_hash_algo;
+                drop_mutability!(maybe_spend_tx);
 
                 for (index, input) in maybe_spend_tx.inputs.iter().enumerate() {
                     if input.previous_output.hash == tx_hash && input.previous_output.index == vout as u32 {
                         return Ok(Some(SpentOutputInfo {
-                            spending_tx: maybe_spend_tx,
+                            input: input.clone(),
                             input_index: index,
+                            spending_tx: maybe_spend_tx,
                             spent_in_block: BlockHashOrHeight::Height(item.height),
                         }));
                     }
@@ -3056,7 +3069,7 @@ async fn connect_impl<Spawner: SpawnFuture>(
         static ref CONN_IDX: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
     }
 
-    use mm2_net::wasm_ws::ws_transport;
+    use mm2_net::wasm::wasm_ws::ws_transport;
 
     let conn_idx = CONN_IDX.fetch_add(1, AtomicOrdering::Relaxed);
     let (mut transport_tx, mut transport_rx) = handle_connect_err!(ws_transport(conn_idx, &addr, &spawner).await, addr);
