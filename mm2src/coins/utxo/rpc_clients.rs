@@ -1646,6 +1646,7 @@ impl<K: Clone + Eq + std::hash::Hash, V: Clone> ConcurrentRequestMap<K, V> {
             drop(map);
             rx.await.unwrap()
         } else {
+            state.is_running = true;
             // drop here to avoid holding the lock during await
             drop(map);
             let request_res = request_fut.compat().await;
