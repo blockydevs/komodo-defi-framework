@@ -1586,9 +1586,6 @@ fn spawn_electrum(
 pub struct ElectrumConnection {
     /// The client connected to this SocketAddr
     addr: String,
-    /// Configuration
-    #[allow(dead_code)]
-    config: ElectrumConfig,
     /// The Sender forwarding requests to writing part of underlying stream
     tx: Arc<AsyncMutex<Option<mpsc::Sender<Vec<u8>>>>>,
     /// Responses are stored here
@@ -1667,7 +1664,6 @@ pub struct ElectrumClientImpl {
     client_name: String,
     coin_ticker: String,
     pub(crate) connection_manager: Arc<dyn Deref<Target = dyn ConnectionManagerTrait + Send + Sync> + Send + Sync>,
-    connections: AsyncMutex<Vec<ElectrumConnection>>,
     next_id: AtomicU64,
     protocol_version: OrdRange<f32>,
     get_balance_concurrent_map: ConcurrentRequestMap<String, ElectrumBalance>,
@@ -2334,7 +2330,8 @@ impl ElectrumClient {
     pub(crate) fn get_servers_with_latest_block_count(&self) -> UtxoRpcFut<(Vec<String>, u64)> {
         let selfi = self.clone();
         let fut = async move {
-            let connections = selfi.connections.lock().await;
+            // FIXME: Replace this with a `.get_all_addresses` from the connection manager.
+            let connections: Vec<ElectrumConnection> = vec![];
             let futures = connections
                 .iter()
                 .map(|connection| {
@@ -2657,7 +2654,6 @@ impl ElectrumClientImpl {
             client_name: client_settings.client_name,
             coin_ticker: client_settings.coin_ticker,
             connection_manager,
-            connections: AsyncMutex::new(vec![]),
             next_id: 0.into(),
             protocol_version,
             get_balance_concurrent_map: ConcurrentRequestMap::new(),
@@ -3195,7 +3191,6 @@ fn electrum_connect(
     (
         ElectrumConnection {
             addr,
-            config,
             tx,
             responses,
             protocol_version: AsyncMutex::new(None),
