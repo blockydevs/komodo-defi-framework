@@ -209,10 +209,7 @@ fn get_scripthash_notification_handlers(
     Arc<AsyncMutex<UnboundedReceiver<ScripthashNotification>>>,
 )> {
     if ctx.event_stream_configuration.is_some() {
-        let (sender, receiver): (
-            UnboundedSender<ScripthashNotification>,
-            UnboundedReceiver<ScripthashNotification>,
-        ) = futures::channel::mpsc::unbounded();
+        let (sender, receiver) = futures::channel::mpsc::unbounded();
         Some((sender, Arc::new(AsyncMutex::new(receiver))))
     } else {
         None
