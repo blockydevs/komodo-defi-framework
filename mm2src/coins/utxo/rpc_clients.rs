@@ -127,7 +127,7 @@ impl rustls::client::ServerCertVerifier for NoCertificateVerification {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum UtxoRpcClientEnum {
     Native(NativeClient),
     Electrum(ElectrumClient),
@@ -156,15 +156,6 @@ impl Deref for UtxoRpcClientEnum {
         match self {
             UtxoRpcClientEnum::Native(ref c) => c,
             UtxoRpcClientEnum::Electrum(ref c) => c,
-        }
-    }
-}
-
-impl Clone for UtxoRpcClientEnum {
-    fn clone(&self) -> Self {
-        match self {
-            UtxoRpcClientEnum::Native(c) => UtxoRpcClientEnum::Native(c.clone()),
-            UtxoRpcClientEnum::Electrum(c) => UtxoRpcClientEnum::Electrum(c.clone()),
         }
     }
 }
