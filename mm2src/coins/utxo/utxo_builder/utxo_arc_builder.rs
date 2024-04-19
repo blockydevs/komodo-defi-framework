@@ -343,6 +343,7 @@ pub(crate) async fn block_header_utxo_loop(
         if last_height_in_storage == block_count {
             sync_status_loop_handle.notify_sync_finished(block_count);
             Timer::sleep(args.success_sleep).await;
+            // FIXME: Why do we continue? The receiver should quit after notify_sync_finished
             continue;
         }
 

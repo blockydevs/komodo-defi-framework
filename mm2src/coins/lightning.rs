@@ -1466,3 +1466,19 @@ impl MmCoin for LightningCoin {
 
     fn on_token_deactivated(&self, _ticker: &str) {}
 }
+
+// FIXME: Put this in a proper place
+#[derive(Debug, PartialEq)]
+pub struct BestBlock {
+    pub height: u64,
+    pub hash: H256Json,
+}
+
+impl From<ElectrumBlockHeader> for BestBlock {
+    fn from(block_header: ElectrumBlockHeader) -> Self {
+        BestBlock {
+            height: block_header.block_height(),
+            hash: block_header.block_hash(),
+        }
+    }
+}

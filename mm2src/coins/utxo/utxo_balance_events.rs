@@ -55,7 +55,6 @@ impl EventBehaviour for UtxoStandardCoin {
                         // Check if we have active subscription and connection for script_hash.
                         // If found, skip to subscribing next script_hash
                         if client
-                            .client_impl
                             .connection_manager
                             .check_script_hash_subscription(&scripthash)
                             .await
@@ -86,7 +85,6 @@ impl EventBehaviour for UtxoStandardCoin {
 
                         // If subscription is successful, add to the list.
                         client
-                            .client_impl
                             .connection_manager
                             .add_subscription(&scripthash)
                             .await;

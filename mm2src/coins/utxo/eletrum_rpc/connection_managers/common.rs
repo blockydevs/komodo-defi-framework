@@ -8,6 +8,11 @@ use std::sync::Arc;
 
 use super::{ElectrumConnSettings, ElectrumConnection};
 
+/// This timeout implies both connecting and verifying phases time
+pub const DEFAULT_CONN_TIMEOUT_SEC: u64 = 20;
+pub const SUSPEND_TIMEOUT_INIT_SEC: u64 = 30;
+
+
 #[derive(Debug)]
 pub(crate) struct ElectrumConnCtx {
     pub(crate) conn_settings: ElectrumConnSettings,
@@ -73,7 +78,3 @@ pub enum ConnectionManagerErr {
     #[display(fmt = "No settings to connect to found")]
     SettingsNotSet,
 }
-
-/// This timeout implies both connecting and verifying phases time
-pub const DEFAULT_CONN_TIMEOUT_SEC: u64 = 20;
-pub const SUSPEND_TIMEOUT_INIT_SEC: u64 = 30;

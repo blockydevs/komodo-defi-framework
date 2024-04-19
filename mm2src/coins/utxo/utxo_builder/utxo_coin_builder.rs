@@ -62,11 +62,6 @@ pub enum UtxoCoinBuildError {
         electrum_servers,
         seconds
     )]
-    FailedToConnectToElectrums {
-        electrum_servers: Vec<ElectrumConnSettings>,
-        seconds: u64,
-    },
-    ElectrumProtocolVersionCheckError(String),
     #[display(fmt = "Can not detect the user home directory")]
     CantDetectUserHome,
     #[display(fmt = "Private key policy is not allowed: {}", _0)]
@@ -79,6 +74,7 @@ pub enum UtxoCoinBuildError {
     )]
     CoinDoesntSupportTrezor,
     BlockHeaderStorageError(BlockHeaderStorageError),
+    // TODO: this isn't used
     #[display(fmt = "Error {} on getting the height of the latest block from rpc!", _0)]
     CantGetBlockCount(String),
     #[display(fmt = "Internal error: {}", _0)]
@@ -576,30 +572,16 @@ pub trait UtxoCoinBuilderCommonOps {
             negotiate_version: args.negotiate_version,
             connection_manager_policy: ctx.electrum_connection_manager_policy(),
         };
-        let client = ElectrumClient::try_new(
+
+        ElectrumClient::try_new(
             client_settings,
             event_handlers,
             block_headers_storage,
             abortable_system,
             scripthash_notification_sender,
+            args.spawn_ping,
         )
-        .map_to_mm(UtxoCoinBuildError::Internal)?;
-
-        client.connect().await.map_to_mm(UtxoCoinBuildError::Internal)?;
-
-        let mut attempts = 0i32;
-        while !client.is_connected().await {
-            if attempts >= 10 {
-                return MmError::err(UtxoCoinBuildError::FailedToConnectToElectrums {
-                    electrum_servers: servers.clone(),
-                    seconds: 5,
-                });
-            }
-            Timer::sleep(0.5).await;
-            attempts += 1;
-        }
-
-        Ok(client)
+        .map_to_mm(UtxoCoinBuildError::Internal)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -808,27 +790,3 @@ fn read_native_mode_conf(
     )));
     Ok((rpc_port, rpc_user.clone(), rpc_password.clone()))
 }
-
-// /// Wait until the protocol version of at least one client's Electrum is checked.
-// async fn wait_for_protocol_version_checked(client: &ElectrumClientImpl) -> Result<(), String> {
-//     repeatable!(async {
-//         if client.count_connections().await == 0 {
-//             // All of the connections were removed because of server.version checking
-//             return Ready(ERR!(
-//                 "There are no Electrums with the required protocol version {:?}",
-//                 client.protocol_version()
-//             ));
-//         }
-//
-//         if client.is_protocol_version_checked().await {
-//             return Ready(Ok(()));
-//         }
-//         Retry(())
-//     })
-//     .repeat_every_secs(0.5)
-//     .attempts(10)
-//     .await
-//     .map_err(|_exceed| ERRL!("Failed protocol version verifying of at least 1 of Electrums in 5 seconds."))
-//     // Flatten `Result< Result<(), String>, String >`
-//     .flatten()
-// }

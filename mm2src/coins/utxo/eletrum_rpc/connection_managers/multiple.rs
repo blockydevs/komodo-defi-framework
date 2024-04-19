@@ -321,6 +321,12 @@ impl ConnectionManagerMultipleImpl {
 }
 
 impl ConnectionManagerMultipleState {
+    fn register_connection(&mut self, conn: ElectrumConnection) -> Result<(), ConnectionManagerErr> {
+        let (_, conn_ctx) = self.get_connection_ctx_mut(&conn.addr)?;
+        conn_ctx.connection.replace(Arc::new(AsyncMutex::new(conn)));
+        Ok(())
+    }
+
     fn reset_connection_context(
         &mut self,
         address: &str,
@@ -351,8 +357,8 @@ impl ConnectionManagerMultipleState {
     }
 
     fn set_suspend_timeout<F: Fn(u64) -> u64>(&mut self, address: &str, method: F) -> Result<(), ConnectionManagerErr> {
-        let conn_ctx = self.get_connection_ctx_mut(address)?;
-        let suspend_timeout = &mut conn_ctx.1.suspend_timeout_sec;
+        let (_, conn_ctx) = self.get_connection_ctx_mut(address)?;
+        let suspend_timeout = &mut conn_ctx.suspend_timeout_sec;
         let new_value = method(*suspend_timeout);
         debug!(
             "Set suspend timeout for address: {} - from: {} to the value: {}",
@@ -376,11 +382,5 @@ impl ConnectionManagerMultipleState {
             .enumerate()
             .find(|(_, ctx)| ctx.conn_settings.url == address)
             .ok_or_else(|| ConnectionManagerErr::UnknownAddress(address.to_string()))
-    }
-
-    fn register_connection(&mut self, conn: ElectrumConnection) -> Result<(), ConnectionManagerErr> {
-        let (_, conn_ctx) = self.get_connection_ctx_mut(&conn.addr)?;
-        conn_ctx.connection.replace(Arc::new(AsyncMutex::new(conn)));
-        Ok(())
     }
 }

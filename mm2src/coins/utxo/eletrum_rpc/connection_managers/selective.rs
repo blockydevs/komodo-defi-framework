@@ -157,7 +157,7 @@ impl ConnectionManagerTrait for Arc<ConnectionManagerSelectiveImpl> {
     }
 
     async fn rotate_servers(&self, _no_of_rotations: usize) {
-        // TODO: Change the active server
+        // FIXME: Change the active server
     }
 
     async fn is_connections_pool_empty(&self) -> bool { self.inner_state.lock().await.connection_contexts.is_empty() }
@@ -382,6 +382,10 @@ impl ConnectionManagerSelectiveImpl {
         event_sender: futures::channel::mpsc::UnboundedSender<ElectrumClientEvent>,
         scripthash_notification_sender: &ScripthashNotificationSender,
     ) -> Result<(), ConnectionManagerErr> {
+        // FIXME: Just make spawn electrum blocking and wait until a connection is read and return that connection.
+        // i.e. move connection ready logic to spawn electrum. You would also need a kill switch logic to cancel
+        // the connection if it's not ready within the timeout.
+        // Another idea (instead of i.e.): Propagate timeout_sec to the very end and run it in parallel with connecting.
         let (conn, mut conn_ready_receiver) = spawn_electrum(
             &conn_settings,
             weak_spawner.clone(),
@@ -396,7 +400,7 @@ impl ConnectionManagerSelectiveImpl {
                 warn!("Failed to connect to: {}, timed out", conn_settings.url);
                 Err(ConnectionManagerErr::ConnectingError(conn_settings.url.clone(), format!("Timed out: {}", timeout_sec)))
             },
-            _ = conn_ready_receiver => Ok(()) // TODO: handle cancelled
+            _ = conn_ready_receiver => Ok(()) // FIXME: handle cancelled
         }
     }
 }
@@ -452,7 +456,7 @@ impl ConnectionManagerSelectiveState {
     }
 
     fn reset_suspend_timeout(&mut self, address: &str) -> Result<(), ConnectionManagerErr> {
-        // TODO: We should probably reset the timeout to the original timeout used for this electrum server?
+        // FIXME: We should probably reset the timeout to the original timeout used for this electrum server?
         self.set_suspend_timeout(address, |_| SUSPEND_TIMEOUT_INIT_SEC)
     }
 
