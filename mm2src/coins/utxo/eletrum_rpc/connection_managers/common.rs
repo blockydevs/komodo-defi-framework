@@ -6,7 +6,7 @@ use futures::lock::Mutex as AsyncMutex;
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use super::{ElectrumConnSettings, ElectrumConnection};
+use super::{ElectrumConnectionSettings, ElectrumConnection};
 
 /// This timeout implies both connecting and verifying phases time
 pub const DEFAULT_CONN_TIMEOUT_SEC: u64 = 20;
@@ -15,7 +15,7 @@ pub const SUSPEND_TIMEOUT_INIT_SEC: u64 = 30;
 
 #[derive(Debug)]
 pub(crate) struct ElectrumConnCtx {
-    pub(crate) conn_settings: ElectrumConnSettings,
+    pub(crate) conn_settings: ElectrumConnectionSettings,
     pub(crate) abortable_system: AbortableQueue,
     pub(crate) suspend_timeout_sec: u64,
     pub(crate) connection: Option<Arc<AsyncMutex<ElectrumConnection>>>,

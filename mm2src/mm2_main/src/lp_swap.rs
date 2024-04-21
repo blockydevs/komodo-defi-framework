@@ -1835,7 +1835,7 @@ pub fn generate_secret() -> Result<[u8; 32], rand::Error> {
 mod lp_swap_tests {
     use super::*;
     use crate::mm2::lp_native_dex::{fix_directories, init_p2p};
-    use coins::utxo::rpc_clients::ElectrumConnSettings;
+    use coins::utxo::rpc_clients::ElectrumConnectionSettings;
     use coins::utxo::utxo_standard::utxo_standard_coin_with_priv_key;
     use coins::utxo::{UtxoActivationParams, UtxoRpcMode};
     use coins::MarketCoinOps;
@@ -2219,7 +2219,7 @@ mod lp_swap_tests {
             mode: UtxoRpcMode::Electrum {
                 servers: electrums
                     .iter()
-                    .map(|url| ElectrumConnSettings {
+                    .map(|url| ElectrumConnectionSettings {
                         url: url.to_string(),
                         protocol: Default::default(),
                         disable_cert_verification: false,

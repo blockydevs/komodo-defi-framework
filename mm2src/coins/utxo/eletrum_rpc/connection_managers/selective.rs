@@ -13,7 +13,7 @@ use common::log::{debug, error, info, warn};
 
 use super::connection_manager_common::{ConnectionManagerErr, ConnectionManagerTrait, ElectrumConnCtx,
                                        DEFAULT_CONN_TIMEOUT_SEC, SUSPEND_TIMEOUT_INIT_SEC};
-use super::{spawn_electrum, ElectrumClientEvent, ElectrumConnSettings, ElectrumConnection};
+use super::{spawn_electrum, ElectrumClientEvent, ElectrumConnectionSettings, ElectrumConnection};
 use mm2_rpc::data::legacy::Priority;
 
 #[derive(Clone, Debug)]
@@ -44,7 +44,7 @@ impl Deref for ConnectionManagerSelective {
 
 impl ConnectionManagerSelective {
     pub(super) fn try_new(
-        servers: Vec<ElectrumConnSettings>,
+        servers: Vec<ElectrumConnectionSettings>,
         abortable_system: AbortableQueue,
         event_sender: futures::channel::mpsc::UnboundedSender<ElectrumClientEvent>,
         scripthash_notification_sender: ScripthashNotificationSender,
@@ -222,7 +222,7 @@ impl ConnectionManagerTrait for Arc<ConnectionManagerSelectiveImpl> {
 
 impl ConnectionManagerSelectiveImpl {
     fn try_new(
-        servers: Vec<ElectrumConnSettings>,
+        servers: Vec<ElectrumConnectionSettings>,
         abortable_system: AbortableQueue,
         event_sender: futures::channel::mpsc::UnboundedSender<ElectrumClientEvent>,
         scripthash_notification_sender: ScripthashNotificationSender,
@@ -264,7 +264,7 @@ impl ConnectionManagerSelectiveImpl {
         })
     }
 
-    async fn fetch_conn_settings(&self) -> Option<(ElectrumConnSettings, WeakSpawner)> {
+    async fn fetch_conn_settings(&self) -> Option<(ElectrumConnectionSettings, WeakSpawner)> {
         let inner = self.inner_state.lock().await;
         if inner.active.is_some() {
             warn!("Skip connecting, already connected");
@@ -377,7 +377,7 @@ impl ConnectionManagerSelectiveImpl {
 
     async fn connect_to(
         &self,
-        conn_settings: ElectrumConnSettings,
+        conn_settings: ElectrumConnectionSettings,
         weak_spawner: WeakSpawner,
         event_sender: futures::channel::mpsc::UnboundedSender<ElectrumClientEvent>,
         scripthash_notification_sender: &ScripthashNotificationSender,

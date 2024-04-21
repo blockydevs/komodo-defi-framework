@@ -1,11 +1,11 @@
+const PING_TIMEOUT_SEC: f64 = 30;
+const ELECTRUM_TIMEOUT_SEC: u64 = 60;
 const BLOCKCHAIN_HEADERS_SUB_ID: &str = "blockchain.headers.subscribe";
 const BLOCKCHAIN_SCRIPTHASH_SUB_ID: &str = "blockchain.scripthash.subscribe";
-const PING_TIMEOUT_SEC: f64 = 30_f64;
-const ELECTRUM_TIMEOUT_SEC: u64 = 60;
 
 /// Electrum protocol version verifier.
 /// Once a connection is established, it make's sure it is of the correct version.
-/// 
+///
 /// FIXME: check the possibility of getting rid of this checked directly after connection
 /// making the caller wait until the version is checked to report back to them if this connection will work or not.
 /// this requires running the connection loop at first (concurrently) to be able to query the version and then decide
@@ -35,29 +35,42 @@ impl RpcTransportEventHandler for ElectrumProtoVerifier {
     }
 }
 
+/// An `RpcTransportEventHandler` that forwards `ScripthashNotification`s to trigger balance updates.
+///
+/// This handler hooks in `on_incoming_response` and looks for an electrum script hash notification to forward it.
 struct ElectrumScriptHashNotificationBridge {
-    // script hash notifier here
+    scripthahs_notification_sender: UnboundedSender<ScripthashNotification>,
 }
 
 impl RpcTransportEventHandler for ElectrumProtoVerifier {
     fn debug_info(&self) -> String { "ElectrumScriptHashNotificationBridge".into() }
 
-    fn on_outgoing_request(&self, _data_len: usize) {}
+    fn on_outgoing_request(&self, data: &[u8]) {}
 
-    fn on_incoming_response(&self, _data_len: usize) {}
-
-    fn on_connected(&self, address: &str) -> Result<(), String> {
-        debug!("Connected to the electrum server: {}", address);
-        // check version using ElectrumClient
-        // best done in another thread to not block the caller.
-        Ok(())
+    fn on_incoming_response(&self, data: &[u8]) {
+        if let Some(raw_json) = json::from_slice::<Json>(data) {
+            // Try to parse the notification. A notification is sent as a JSON-RPC request.
+            if let Some(notification) = json::from_value::<JsonRpcRequest>(raw_json) {
+                // Only care about `BLOCKCHAIN_SCRIPTHASH_SUB_ID` notifications.
+                if notification.method.as_ref() == BLOCKCHAIN_SCRIPTHASH_SUB_ID {
+                    if let Some(scripthash) = notification.params.first().map(|s| s.as_str()).flatten() {
+                        if let Err(e) = self
+                            .scripthash_notification_sender
+                            .send(ScripthashNotification::Trigger(scripthash.to_string()))
+                        {
+                            error!("Failed sending script hash message. {e}");
+                        }
+                    } else {
+                        warn!("Notification must contain the script hash value, got: {notification}");
+                    }
+                };
+            }
+        }
     }
 
-    fn on_disconnected(&self, address: &str) -> Result<(), String> {
-        debug!("Disconnected from the electrum server: {}", address);
-        // reset protocol version
-        Ok(())
-    }
+    fn on_connected(&self, address: &str) -> Result<(), String> {}
+
+    fn on_disconnected(&self, address: &str) -> Result<(), String> {}
 }
 
 #[inline]
@@ -67,13 +80,14 @@ pub fn electrum_script_hash(script: &[u8]) -> Vec<u8> {
     sha.finalize().to_vec().into_iter().rev().collect()
 }
 
-async fn check_electrum_server_version(client: &ElectrumClient, client_name: &str, electrum_addr: &str) -> bool {
+async fn check_electrum_server_version(client: &ElectrumClient, electrum_addr: &str) -> bool {
     async fn remove_server(client: &ElectrumClient, electrum_addr: &str) {
         if let Err(e) = client.remove_server(electrum_addr).await {
             error!("Error on remove server: {}", e);
         }
     }
 
+    let client_name = client.client_name();
     let protocol_version = client.protocol_version();
     debug!("Check version, supported protocols: {:?}", protocol_version);
     let version = match client
@@ -128,108 +142,6 @@ fn rx_to_stream(rx: mpsc::Receiver<Vec<u8>>) -> impl Stream<Item = Vec<u8>, Erro
     rx.map_err(|_| panic!("errors not possible on rx"))
 }
 
-async fn electrum_process_json(
-    raw_json: Json,
-    arc: &JsonRpcPendingRequestsShared,
-    scripthash_notification_sender: &ScripthashNotificationSender,
-) {
-    // detect if we got standard JSONRPC response or subscription response as JSONRPC request
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum ElectrumRpcResponseEnum {
-        /// The subscription response as JSONRPC request.
-        ///
-        /// NOTE Because JsonRpcResponse uses default values for each of its field,
-        /// this variant has to stay at top in this enumeration to be properly deserialized
-        /// from serde.
-        SubscriptionNotification(JsonRpcRequest),
-        /// The standard JSONRPC single response.
-        SingleResponse(JsonRpcResponse),
-        /// The batch of standard JSONRPC responses.
-        BatchResponses(JsonRpcBatchResponse),
-    }
-
-    let response: ElectrumRpcResponseEnum = match json::from_value(raw_json) {
-        Ok(res) => res,
-        Err(e) => {
-            error!("{}", e);
-            return;
-        },
-    };
-
-    let response = match response {
-        ElectrumRpcResponseEnum::SingleResponse(single) => JsonRpcResponseEnum::Single(single),
-        ElectrumRpcResponseEnum::BatchResponses(batch) => JsonRpcResponseEnum::Batch(batch),
-        ElectrumRpcResponseEnum::SubscriptionNotification(req) => {
-            let id = match req.method.as_ref() {
-                BLOCKCHAIN_HEADERS_SUB_ID => BLOCKCHAIN_HEADERS_SUB_ID,
-                BLOCKCHAIN_SCRIPTHASH_SUB_ID => {
-                    let scripthash = match req.params.first() {
-                        Some(t) => t.as_str().unwrap_or_default(),
-                        None => {
-                            debug!("Notification must contain the scripthash value.");
-                            return;
-                        },
-                    };
-
-                    if let Some(sender) = scripthash_notification_sender {
-                        debug!("Sending scripthash message");
-                        if let Err(e) = sender.unbounded_send(ScripthashNotification::Triggered(scripthash.to_string()))
-                        {
-                            error!("Failed sending scripthash message. {e}");
-                            return;
-                        };
-                    };
-                    BLOCKCHAIN_SCRIPTHASH_SUB_ID
-                },
-                _ => {
-                    error!("Couldn't get id of request {:?}", req);
-                    return;
-                },
-            };
-            // FIXME: What is this used for? Note that the id is the method name in this case (two similar id will collide),
-            // but this isn't a response to any request anyways, this is a notification, and we forwarded using the
-            // scripthash_notification_sender above already.
-            JsonRpcResponseEnum::Single(JsonRpcResponse {
-                id: id.into(),
-                jsonrpc: "2.0".into(),
-                result: req.params[0].clone(),
-                error: Json::Null,
-            })
-        },
-    };
-
-    // the corresponding sender may not exist, receiver may be dropped
-    // these situations are not considered as errors so we just silently skip them
-    let mut pending = arc.lock().await;
-    if let Some(tx) = pending.remove(&response.rpc_id()) {
-        tx.send(response).ok();
-    }
-}
-
-async fn electrum_process_chunk(
-    chunk: &[u8],
-    arc: &JsonRpcPendingRequestsShared,
-    scripthash_notification_sender: ScripthashNotificationSender,
-) {
-    // we should split the received chunk because we can get several responses in 1 chunk.
-    let split = chunk.split(|item| *item == b'\n');
-
-    for chunk in split {
-        // split returns empty slice if it ends with separator which is our case
-        if !chunk.is_empty() {
-            let raw_json: Json = match json::from_slice(chunk) {
-                Ok(json) => json,
-                Err(e) => {
-                    error!("{}", e);
-                    return;
-                },
-            };
-            electrum_process_json(raw_json, arc, &scripthash_notification_sender).await
-        }
-    }
-}
-
 macro_rules! handle_connect_err {
     ($e:expr, $addr: ident) => {
         match $e {
@@ -242,6 +154,10 @@ macro_rules! handle_connect_err {
     };
 }
 
+/// Starts the connection loop that keeps an active connection to the electrum server.
+///
+/// This will first try to connect to the server and use that connection to query its version.
+/// If version checks succeed, the connection will be kept alive, otherwise, it will be dropped.
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(clippy::too_many_arguments)]
 async fn establish_connection_loop<Spawner: SpawnFuture>(
@@ -568,7 +484,7 @@ fn electrum_connect(
 /// The function takes `abortable_system` that will be used to spawn Electrum's related futures.
 #[cfg(not(target_arch = "wasm32"))]
 fn spawn_electrum(
-    conn_settings: &ElectrumConnSettings,
+    conn_settings: &ElectrumConnectionSettings,
     spawner: WeakSpawner,
     event_sender: futures::channel::mpsc::UnboundedSender<ElectrumClientEvent>,
     scripthash_notification_sender: &ScripthashNotificationSender,
@@ -614,7 +530,7 @@ fn spawn_electrum(
 /// The function takes `abortable_system` that will be used to spawn Electrum's related futures.
 #[cfg(target_arch = "wasm32")]
 fn spawn_electrum(
-    conn_settings: &ElectrumConnSettings,
+    conn_settings: &ElectrumConnectionSettings,
     spawner: WeakSpawner,
     event_sender: futures::channel::mpsc::UnboundedSender<ElectrumClientEvent>,
     scripthash_notification_sender: &ScripthashNotificationSender,

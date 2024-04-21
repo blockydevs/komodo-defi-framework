@@ -13,7 +13,7 @@ use common::log::{debug, error, info, warn};
 
 use super::connection_manager_common::{ConnectionManagerErr, ConnectionManagerTrait, ElectrumConnCtx,
                                        DEFAULT_CONN_TIMEOUT_SEC, SUSPEND_TIMEOUT_INIT_SEC};
-use super::{spawn_electrum, ElectrumClientEvent, ElectrumConnSettings, ElectrumConnection};
+use super::{spawn_electrum, ElectrumClientEvent, ElectrumConnectionSettings, ElectrumConnection};
 
 #[derive(Clone, Debug)]
 pub(super) struct ConnectionManagerMultiple(Arc<ConnectionManagerMultipleImpl>);
@@ -40,7 +40,7 @@ impl Deref for ConnectionManagerMultiple {
 
 impl ConnectionManagerMultiple {
     pub(super) fn try_new(
-        servers: Vec<ElectrumConnSettings>,
+        servers: Vec<ElectrumConnectionSettings>,
         abortable_system: AbortableQueue,
         event_sender: futures::channel::mpsc::UnboundedSender<ElectrumClientEvent>,
         scripthash_notification_sender: ScripthashNotificationSender,
@@ -191,7 +191,7 @@ impl ConnectionManagerTrait for Arc<ConnectionManagerMultipleImpl> {
 
 impl ConnectionManagerMultipleImpl {
     fn try_new(
-        servers: Vec<ElectrumConnSettings>,
+        servers: Vec<ElectrumConnectionSettings>,
         abortable_system: AbortableQueue,
         event_sender: futures::channel::mpsc::UnboundedSender<ElectrumClientEvent>,
         scripthash_notification_sender: ScripthashNotificationSender,
@@ -281,7 +281,7 @@ impl ConnectionManagerMultipleImpl {
 
     async fn connect_to(
         self: Arc<ConnectionManagerMultipleImpl>,
-        conn_settings: &ElectrumConnSettings,
+        conn_settings: &ElectrumConnectionSettings,
         weak_spawner: WeakSpawner,
     ) -> Result<(), ConnectionManagerErr> {
         let (conn, mut conn_ready_receiver) = spawn_electrum(

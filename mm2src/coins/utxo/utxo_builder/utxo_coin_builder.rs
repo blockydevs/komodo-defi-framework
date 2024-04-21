@@ -1,6 +1,6 @@
 use crate::hd_wallet::{HDAccountsMap, HDAccountsMutex};
 use crate::hd_wallet_storage::{HDWalletCoinStorage, HDWalletStorageError};
-use crate::utxo::rpc_clients::{ElectrumClient, ElectrumClientSettings, ElectrumConnSettings, EstimateFeeMethod,
+use crate::utxo::rpc_clients::{ElectrumClient, ElectrumClientSettings, ElectrumConnectionSettings, EstimateFeeMethod,
                                UtxoRpcClientEnum};
 use crate::utxo::tx_cache::{UtxoVerboseCacheOps, UtxoVerboseCacheShared};
 use crate::utxo::utxo_block_header_storage::BlockHeaderStorage;
@@ -543,17 +543,18 @@ pub trait UtxoCoinBuilderCommonOps {
         &self,
         abortable_system: AbortableQueue,
         args: ElectrumBuilderArgs,
-        servers: Vec<ElectrumConnSettings>,
+        servers: Vec<ElectrumConnectionSettings>,
         scripthash_notification_sender: ScripthashNotificationSender,
     ) -> UtxoCoinBuildResult<ElectrumClient> {
         let coin_ticker = self.ticker().to_owned();
         let ctx = self.ctx();
         let mut event_handlers = vec![];
         if args.collect_metrics {
-            event_handlers.push(
-                CoinTransportMetrics::new(ctx.metrics.weak(), coin_ticker.clone(), RpcClientType::Electrum)
-                    .into_shared(),
-            );
+            event_handlers.push(Box::new(CoinTransportMetrics::new(
+                ctx.metrics.weak(),
+                coin_ticker.clone(),
+                RpcClientType::Electrum,
+            )));
         }
 
         let storage_ticker = self.ticker().replace('-', "_");
