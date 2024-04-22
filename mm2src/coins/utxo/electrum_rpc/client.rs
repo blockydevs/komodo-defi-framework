@@ -38,16 +38,19 @@ pub(super) struct ElectrumClientSettings {
     pub(super) connection_manager_policy: ConnectionManagerPolicy,
 }
 
-pub enum DisconnectionReason {
-    VersionMismatch,
-    Timeout,
+#[derive(Debug)]
+enum ElectrumConnectionErr {
+    Timeout(f32),
+    Temporary(String),
+    Irrecoverable(String),
+    VersionMismatch(f32, f32),
 }
 
 /// Represents the active Electrum connection to selected address
 #[derive(Debug)]
 pub struct ElectrumConnection {
     /// The client connected to this SocketAddr
-    addr: String,
+    settings: ElectrumConnectionSettings,
     /// The Sender forwarding requests to writing part of underlying stream
     tx: AsyncMutex<Option<mpsc::Sender<Vec<u8>>>>,
     /// Responses are stored here
@@ -55,11 +58,24 @@ pub struct ElectrumConnection {
     /// Selected protocol version. The value is initialized after the server.version RPC call.
     protocol_version: AsyncMutex<Option<f32>>,
     /// Why was the connection disconnected the last time?
-    disconnected_because: AsyncMutex<Option<DisconnectionReason>>,
+    last_error: AsyncMutex<Option<ElectrumConnectionErr>>,
+    /// An abortable system for connection specific tasks to run on.
+    abortable_system: AbortableQueue,
 }
 
 impl ElectrumConnection {
-    async fn address(&self) -> &str { &self.addr }
+    async fn new(settings: ElectrumConnectionSettings) -> Self {
+        ElectrumConnection {
+            settings,
+            tx: AsyncMutex::new(None),
+            responses: AsyncMutex::new(JsonRpcPendingRequests::new()),
+            protocol_version: AsyncMutex::new(None),
+            last_error: AsyncMutex::new(None),
+            abortable_system: AbortableQueue::default(),
+        }
+    }
+
+    async fn address(&self) -> &str { &self.settings.url }
 
     async fn set_protocol_version(&self, version: f32) { self.protocol_version.lock().await.replace(version); }
 
@@ -69,22 +85,62 @@ impl ElectrumConnection {
 
     async fn connect(&self, tx: mpsc::Sender<Vec<u8>>) {
         // Make sure we are disconnected first.
-        self.disconnect().await;
+        self.disconnect(None).await;
         // We don't know the server version, the caller should run a connection loop and query the server version to set it.
         self.tx.lock().await.replace(tx);
-        self.disconnected_because.lock().await.take();
+        self.last_error.lock().await.take();
     }
 
     /// Disconnect and clear the connection state.
-    async fn disconnect(&self, reason: DisconnectionReason) {
+    async fn disconnect(&self, reason: Option<ElectrumConnectionErr>) {
         self.tx.lock().await.take();
         self.responses.lock().await.clear();
         self.protocol_version.lock().await.take();
-        self.disconnected_because.lock().await.replace(reason);
+        self.last_error.lock().await = err;
+        self.abortable_system.abort_all().await;
+    }
+
+    /// Sends a request to the electrum server and waits for the response.
+    ///
+    /// ## Important: This should always return [`JsonRpcErrorType::Transport`] error.
+    async fn electrum_request(
+        &self,
+        mut req_json: String,
+        rpc_id: JsonRpcId,
+        timeout: u64,
+    ) -> Result<JsonRpcResponseEnum, JsonRpcErrorType> {
+        #[cfg(not(target_arch = "wasm"))]
+        {
+            // Electrum request and responses must end with \n
+            // https://electrumx.readthedocs.io/en/latest/protocol-basics.html#message-stream
+            req_json.push('\n');
+        }
+
+        // Create a oneshot channel to receive the response in.
+        let (req_tx, res_rx) = async_oneshot::channel();
+        self.responses.lock().await.insert(rpc_id, req_tx);
+        let tx = self
+            .tx
+            .lock()
+            .await
+            .ok_or_else(|| JsonRpcErrorType::Transport("Connection is not established".to_string()))?
+            // Clone to not to hold the lock while sending the request.
+            .clone();
+
+        // Send the request to the electrum server.
+        tx.send(req_json.into_bytes())
+            .await
+            .map_err(|e| JsonRpcErrorType::Transport(e.to_string()))?;
+
+        // Wait for the response to be processed and sent back to us.
+        res_rx
+            .timeout(Duration::from_secs(timeout))
+            .await
+            .map_err(|e| JsonRpcErrorType::Transport(e.to_string()))
     }
 
     /// Process an incoming JSONRPC response from the electrum server.
-    async fn electrum_process_json(&self, raw_json: Json, event_handlers: &Vec<RpcTransportEventHandlerShared>) {
+    async fn process_electrum_response(&self, raw_json: Json, event_handlers: &Vec<Box<dyn RpcTransportEventHandler>>) {
         event_handlers.on_incoming_response(raw_json.as_bytes());
 
         // detect if we got standard JSONRPC response or subscription response as JSONRPC request
@@ -133,8 +189,8 @@ impl ElectrumConnection {
 
         // the corresponding sender may not exist, receiver may be dropped
         // these situations are not considered as errors so we just silently skip them
-        let mut pending = self.responses.lock().await;
-        if let Some(tx) = pending.remove(&response.rpc_id()) {
+        let pending = self.responses.lock().await.remove(&response.rpc_id());
+        if let Some(tx) = pending {
             tx.send(response).ok();
         }
     }
@@ -142,21 +198,25 @@ impl ElectrumConnection {
     /// Process a bulk response from the electrum server.
     ///
     /// A bulk response is a response that contains multiple JSONRPC responses.
-    async fn electrum_process_chunk(&self, chunk: &[u8], event_handlers: &Vec<RpcTransportEventHandlerShared>) {
-        // we should split the received chunk because we can get several responses in 1 chunk.
-        let split = chunk.split(|item| *item == b'\n');
+    async fn process_electrum_bulk_response(
+        &self,
+        bulk_response: &[u8],
+        event_handlers: &Vec<Box<dyn RpcTransportEventHandler>>,
+    ) {
+        // We should split the received response because we can get several responses in bulk.
+        let responses = bulk_response.split(|item| *item == b'\n');
 
-        for chunk in split {
-            // split returns empty slice if it ends with separator which is our case
-            if !chunk.is_empty() {
-                let raw_json: Json = match json::from_slice(chunk) {
+        for response in responses {
+            // `split` returns empty slice if it ends with separator which is our case.
+            if !response.is_empty() {
+                let raw_json: Json = match json::from_slice(response) {
                     Ok(json) => json,
                     Err(e) => {
                         error!("{}", e);
                         return;
                     },
                 };
-                self.electrum_process_json(raw_json, event_handlers).await
+                self.process_electrum_response(raw_json, event_handlers).await
             }
         }
     }
@@ -166,7 +226,7 @@ impl ElectrumConnection {
 pub struct ElectrumClientImpl {
     client_name: String,
     coin_ticker: String,
-    connection_manager: Arc<dyn Deref<Target = dyn ConnectionManagerTrait + Send + Sync> + Send + Sync>,
+    connection_manager: Box<dyn ConnectionManagerTrait + Send + Sync>,
     next_id: AtomicU64,
     protocol_version: OrdRange<f32>,
     // FIXME: What are these used for? Looks like `ConcurrentRequestMap` is used for caching already running requests
@@ -175,7 +235,6 @@ pub struct ElectrumClientImpl {
     get_balance_concurrent_map: ConcurrentRequestMap<String, ElectrumBalance>,
     list_unspent_concurrent_map: ConcurrentRequestMap<String, Vec<ElectrumUnspent>>,
     block_headers_storage: BlockHeaderStorage,
-    negotiate_version: bool,
     /// This is used for balance event streaming implementation for UTXOs.
     /// If balance event streaming isn't enabled, this value will always be `None`; otherwise,
     /// it will be used for sending scripthash messages to trigger re-connections, re-fetching the balances, etc.
@@ -189,42 +248,41 @@ impl ElectrumClientImpl {
         client_settings: ElectrumClientSettings,
         block_headers_storage: BlockHeaderStorage,
         abortable_system: AbortableQueue,
-        event_sender: futures::channel::mpsc::UnboundedSender<ElectrumClientEvent>,
-        scripthash_notification_sender: ScripthashNotificationSender,
+        mut event_handlers: Vec<Box<dyn RpcTransportEventHandler>>,
     ) -> Result<ElectrumClientImpl, String> {
         let sub_abortable_system = abortable_system
             .create_subsystem()
             .map_err(|err| ERRL!("Failed to create connection_manager abortable system: {}", err))?;
-        debug!("Init connection_manager with settings: {:?}", client_settings);
+
         let mut rng = small_rng();
         let mut servers = client_settings.servers;
         servers.as_mut_slice().shuffle(&mut rng);
-        let connection_manager: Arc<dyn Deref<Target = dyn ConnectionManagerTrait + Send + Sync> + Send + Sync> =
+
+        let connection_manager: Box<dyn ConnectionManagerTrait + Send + Sync> =
             match client_settings.connection_manager_policy {
-                ConnectionManagerPolicy::Selective => Arc::new(ConnectionManagerSelective::try_new(
+                ConnectionManagerPolicy::Selective => Box::new(ConnectionManagerSelective::try_new_arc(
                     servers,
+                    event_handlers,
                     sub_abortable_system,
-                    event_sender,
-                    scripthash_notification_sender.clone(),
+                    client_settings.negotiate_version,
                 )?),
-                ConnectionManagerPolicy::Multiple => Arc::new(ConnectionManagerMultiple::try_new(
+                ConnectionManagerPolicy::Multiple => Box::new(ConnectionManagerMultiple::try_new_arc(
                     servers,
+                    event_handlers,
                     sub_abortable_system,
-                    event_sender,
-                    scripthash_notification_sender.clone(),
+                    client_settings.negotiate_version,
                 )?),
             };
-        let protocol_version = OrdRange::new(1.2, 1.4).unwrap();
+
         Ok(ElectrumClientImpl {
             client_name: client_settings.client_name,
             coin_ticker: client_settings.coin_ticker,
             connection_manager,
             next_id: 0.into(),
-            protocol_version,
+            protocol_version: OrdRange::new(1.2, 1.4).unwrap(),
             get_balance_concurrent_map: ConcurrentRequestMap::new(),
             list_unspent_concurrent_map: ConcurrentRequestMap::new(),
             block_headers_storage,
-            negotiate_version: client_settings.negotiate_version,
             abortable_system,
             scripthash_notification_sender,
         })
@@ -328,17 +386,23 @@ impl JsonRpcClient for ElectrumClient {
     fn client_info(&self) -> String { UtxoJsonRpcClientInfo::client_info(self) }
 
     fn transport(&self, request: JsonRpcRequestEnum) -> JsonRpcResponseFut {
-        Box::new(electrum_request_multi(self.clone(), request).boxed().compat())
-    }
-}
-
-impl JsonRpcMultiClient for ElectrumClient {
-    fn transport_exact(&self, to_addr: String, request: JsonRpcRequestEnum) -> JsonRpcResponseFut {
-        Box::new(electrum_request_to(self.clone(), request, to_addr).boxed().compat())
+        Box::new(self.electrum_request_multi(request).boxed().compat())
     }
 }
 
 impl JsonRpcBatchClient for ElectrumClient {}
+
+impl JsonRpcMultiClient for ElectrumClient {
+    fn transport_exact(&self, to_addr: String, request: JsonRpcRequestEnum) -> JsonRpcResponseFut {
+        Box::new(
+            self.electrum_request_to(request, to_addr)
+                // FIXME: Remove the async move if possible.
+                .and_then(|response| async move { Ok(JsonRpcRemoteAddr(to_addr), response) })
+                .boxed()
+                .compat(),
+        )
+    }
+}
 
 #[cfg_attr(test, mockable)]
 impl ElectrumClient {
@@ -350,8 +414,6 @@ impl ElectrumClient {
         scripthash_notification_sender: ScripthashNotificationSender,
         spawn_ping: bool,
     ) -> Result<ElectrumClient, String> {
-        //let spawner = abortable_system.weak_spawner();
-        //let (sender, receiver) = futures::channel::mpsc::unbounded::<ElectrumClientEvent>();
         if let Some(scripthash_notification_sender) = scripthash_notification_sender {
             event_handlers.push(Box::new(ElectrumScriptHashNotificationBridge {
                 scripthash_notification_sender,
@@ -362,71 +424,68 @@ impl ElectrumClient {
             client_settings,
             block_headers_storage,
             abortable_system,
-            //sender,
-            scripthash_notification_sender,
+            event_handlers,
         )?));
-
-        // FIXME: Ping inside the connection loop not here
-        // no event loop is needed, all should be handled using event handlers.
-        // if spwan_ping {
-        //     spawner.spawn(client.clone().ping_loop());
-        // }
-        // spawner.spawn(client.clone().event_loop(receiver, event_handlers));
 
         client.connect().await?;
 
         Ok(client)
     }
 
-    async fn event_loop(
-        self,
-        mut receiver: futures::channel::mpsc::UnboundedReceiver<ElectrumClientEvent>,
-        event_handlers: Vec<RpcTransportEventHandlerShared>,
-    ) {
-        let negotiate_version = self.negotiate_version;
-        while let Some(event) = receiver.next().await {
-            match event {
-                // FIXME: Let's also send script hash notifications through this channel
-                ElectrumClientEvent::Connected {
-                    address,
-                    conn_ready_notifier,
-                } => {
-                    // FIXME(Related to the one above): Send script hash notifications here (RefreshSubscriptions)
-                    if !negotiate_version || check_electrum_server_version(self, address).await {
-                        if conn_ready_notifier.send(()).is_err() {
-                            error!("Failed to notify connection is ready: {}", address);
-                        }
-                    } else if let Err(err) = &self.connection_manager.connect().await {
-                        error!("Failed to reconnect: {}, {}", address, err);
-                    }
-                    let _ = event_handlers.on_connected(&address);
-                    info!("{address} Connected")
-                },
-                ElectrumClientEvent::Disconnected { address } => {
-                    // Inform the connection manager so it can replace this with another connection.
-                    self.connection_manager.on_disconnected(&address).await;
-                    let _ = event_handlers.on_disconnected(&address);
-                    info!("{address} Disconnected")
-                },
-                ElectrumClientEvent::IncomingResponse { data_len } => event_handlers.on_incoming_response(data_len),
-                ElectrumClientEvent::OutgoingRequest { data_len } => event_handlers.on_outgoing_request(data_len),
+    /// Sends a JSONRPC request to all the connected servers.
+    ///
+    /// A client with `ConnectionManagerPolicy::Multiple` will send the request to active connected servers,
+    /// which are *all* the servers if non of them is erroring (timeout, version mismatch, etc).
+    /// A client with `ConnectionManagerPolicy::Selective` will send the request to the currently selected active server.
+    async fn electrum_request_multi(
+        &self,
+        request: JsonRpcRequestEnum,
+    ) -> Result<(JsonRpcRemoteAddr, JsonRpcResponseEnum), JsonRpcErrorType> {
+        let mut errors = vec![];
+        let connections = self.connection_manager.get_connection().await;
+
+        for connection in connections {
+            let json = json::to_string(&request).map_err(|e| JsonRpcErrorType::InvalidRequest(e.to_string()))?;
+            match connection
+                .electrum_request(json, request.rpc_id(), ELECTRUM_TIMEOUT_SEC)
+                .await
+            {
+                Ok(response) => return Ok((JsonRpcRemoteAddr(connection.address().clone()), response)),
+                Err(e) => errors.push((connection.address().clone(), e)),
             }
         }
+
+        if errors.is_empty() {
+            return Err(JsonRpcErrorType::Transport("No connections available".to_string()));
+        }
+
+        return Err(JsonRpcErrorType::Transport(format!(
+            "Failed to perform request {request:?}, errors: {e:?}"
+        )));
     }
 
-    async fn ping_loop(self) {
-        loop {
-            debug!("ping looop");
-            if !self.is_connected().await {
-                continue;
-            }
-            debug!("Ping connected electrum servers");
-            if let Err(e) = self.server_ping().compat().await {
-                error!("Electrum server ping error: {}", e);
-            }
+    /// Sends a JSONRPC request to a specific electrum server.
+    ///
+    /// In `ConnectionManagerPolicy::Selective` mode, the server might not be active, in which case
+    /// the connection manager will try to establish a connection to it.
+    async fn electrum_request_to(
+        &self,
+        to_addr: String,
+        request: JsonRpcRequestEnum,
+    ) -> Result<JsonRpcResponseEnum, JsonRpcErrorType> {
+        let connection = self
+            .connection_manager
+            .get_connection_by_address(to_addr.as_ref())
+            .await
+            .map_err(|err| JsonRpcErrorType::Internal(err.to_string()))?;
 
-            Timer::sleep(PING_TIMEOUT_SEC).await;
-        }
+        let json = json::to_string(&request).map_err(|err| JsonRpcErrorType::InvalidRequest(err.to_string()))?;
+        let response = connection
+            .electrum_request(json, request.rpc_id(), ELECTRUM_TIMEOUT_SEC)
+            .compat()
+            .await?;
+
+        Ok(response)
     }
 
     /// https://electrumx.readthedocs.io/en/latest/protocol-methods.html#server-ping

@@ -3776,17 +3776,17 @@ pub enum CoinProtocol {
 
 pub type RpcTransportEventHandlerShared = Arc<dyn RpcTransportEventHandler + Send + Sync + 'static>;
 
-/// Common methods to measure the outgoing requests and incoming responses statistics.
+/// Common methods to handle the connection events.
 pub trait RpcTransportEventHandler {
     fn debug_info(&self) -> String;
 
-    fn on_outgoing_request(&self, data_len: usize);
+    fn on_outgoing_request(&self, data: &[u8]) {}
 
-    fn on_incoming_response(&self, data_len: usize);
+    fn on_incoming_response(&self, data: &[u8]) {}
 
-    fn on_connected(&self, address: &str) -> Result<(), String>;
+    fn on_connected(&self, address: &str) -> Result<(), String> { Ok(()) }
 
-    fn on_disconnected(&self, address: &str) -> Result<(), String>;
+    fn on_disconnected(&self, address: &str) -> Result<(), String> { Ok(()) }
 }
 
 impl fmt::Debug for dyn RpcTransportEventHandler + Send + Sync {
@@ -3879,31 +3879,20 @@ impl CoinTransportMetrics {
 impl RpcTransportEventHandler for CoinTransportMetrics {
     fn debug_info(&self) -> String { "CoinTransportMetrics".into() }
 
-    fn on_outgoing_request(&self, data_len: usize) {
-        mm_counter!(self.metrics, "rpc_client.traffic.out", data_len as u64,
+    fn on_outgoing_request(&self, data: &[u8]) {
+        mm_counter!(self.metrics, "rpc_client.traffic.out", data.len(),
             "coin" => self.ticker.to_owned(), "client" => self.client.to_owned());
         mm_counter!(self.metrics, "rpc_client.request.count", 1,
             "coin" => self.ticker.to_owned(), "client" => self.client.to_owned());
     }
 
-    fn on_incoming_response(&self, data_len: usize) {
-        mm_counter!(self.metrics, "rpc_client.traffic.in", data_len as u64,
+    fn on_incoming_response(&self, data: &[u8]) {
+        mm_counter!(self.metrics, "rpc_client.traffic.in", data.len(),
             "coin" => self.ticker.to_owned(), "client" => self.client.to_owned());
         mm_counter!(self.metrics, "rpc_client.response.count", 1,
             "coin" => self.ticker.to_owned(), "client" => self.client.to_owned());
     }
 
-    fn on_connected(&self, _address: &str) -> Result<(), String> {
-        // Handle a new connected endpoint if necessary.
-        // Now just return the Ok
-        Ok(())
-    }
-
-    fn on_disconnected(&self, _address: &str) -> Result<(), String> {
-        // Handle disconnected endpoint if necessary.
-        // Now just return the Ok
-        Ok(())
-    }
 }
 
 #[async_trait]

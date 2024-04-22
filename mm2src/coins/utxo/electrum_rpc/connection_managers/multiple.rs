@@ -13,13 +13,11 @@ use common::log::{debug, error, info, warn};
 
 use super::connection_manager_common::{ConnectionManagerErr, ConnectionManagerTrait, ElectrumConnCtx,
                                        DEFAULT_CONN_TIMEOUT_SEC, SUSPEND_TIMEOUT_INIT_SEC};
-use super::{spawn_electrum, ElectrumClientEvent, ElectrumConnectionSettings, ElectrumConnection};
+use super::{spawn_electrum, ElectrumClientEvent, ElectrumConnection, ElectrumConnectionSettings};
 
-#[derive(Clone, Debug)]
-pub(super) struct ConnectionManagerMultiple(Arc<ConnectionManagerMultipleImpl>);
-
+/// you wanna have a force wake method to wake up suspended servers that were queried specifically
 #[derive(Debug)]
-struct ConnectionManagerMultipleImpl {
+pub(super) struct ConnectionManagerMultiple {
     inner_state: AsyncMutex<ConnectionManagerMultipleState>,
     abortable_system: AbortableQueue,
     event_sender: futures::channel::mpsc::UnboundedSender<ElectrumClientEvent>,
@@ -32,31 +30,8 @@ struct ConnectionManagerMultipleState {
     scripthash_subs: HashMap<String, Arc<AsyncMutex<ElectrumConnection>>>,
 }
 
-impl Deref for ConnectionManagerMultiple {
-    type Target = dyn ConnectionManagerTrait + Send + Sync;
-
-    fn deref(&self) -> &Self::Target { &self.0 }
-}
-
-impl ConnectionManagerMultiple {
-    pub(super) fn try_new(
-        servers: Vec<ElectrumConnectionSettings>,
-        abortable_system: AbortableQueue,
-        event_sender: futures::channel::mpsc::UnboundedSender<ElectrumClientEvent>,
-        scripthash_notification_sender: ScripthashNotificationSender,
-    ) -> Result<Self, String> {
-        let inner = ConnectionManagerMultipleImpl::try_new(
-            servers,
-            abortable_system,
-            event_sender,
-            scripthash_notification_sender,
-        )?;
-        Ok(ConnectionManagerMultiple(Arc::new(inner)))
-    }
-}
-
 #[async_trait]
-impl ConnectionManagerTrait for Arc<ConnectionManagerMultipleImpl> {
+impl ConnectionManagerTrait for Arc<ConnectionManagerMultiple> {
     async fn get_connection(&self) -> Vec<Arc<AsyncMutex<ElectrumConnection>>> {
         let connections = &self.inner_state.lock().await.connection_contexts;
         connections
@@ -189,13 +164,13 @@ impl ConnectionManagerTrait for Arc<ConnectionManagerMultipleImpl> {
     }
 }
 
-impl ConnectionManagerMultipleImpl {
-    fn try_new(
+impl ConnectionManagerMultiple {
+    fn try_new_arc(
         servers: Vec<ElectrumConnectionSettings>,
         abortable_system: AbortableQueue,
         event_sender: futures::channel::mpsc::UnboundedSender<ElectrumClientEvent>,
         scripthash_notification_sender: ScripthashNotificationSender,
-    ) -> Result<Self, String> {
+    ) -> Result<Arc<Self>, String> {
         let mut connections = vec![];
         for conn_settings in servers {
             let subsystem = abortable_system.create_subsystem().map_err(|err| {
@@ -214,7 +189,7 @@ impl ConnectionManagerMultipleImpl {
             });
         }
 
-        Ok(ConnectionManagerMultipleImpl {
+        Ok(Arc::new(ConnectionManagerMultiple {
             abortable_system,
             event_sender,
             inner_state: AsyncMutex::new(ConnectionManagerMultipleState {
@@ -222,13 +197,10 @@ impl ConnectionManagerMultipleImpl {
                 scripthash_subs: HashMap::new(),
             }),
             scripthash_notification_sender,
-        })
+        }))
     }
 
-    async fn suspend_server(
-        self: Arc<ConnectionManagerMultipleImpl>,
-        address: &str,
-    ) -> Result<(), ConnectionManagerErr> {
+    async fn suspend_server(self: Arc<ConnectionManagerMultiple>, address: &str) -> Result<(), ConnectionManagerErr> {
         debug!(
             "About to suspend connection to addr: {}, inner: {:?}",
             address, self.inner_state
@@ -247,7 +219,7 @@ impl ConnectionManagerMultipleImpl {
     }
 
     // workaround to avoid the cycle detected compilation error that blocks recursive async calls
-    fn spawn_resume_server(self: Arc<ConnectionManagerMultipleImpl>, address: &str, suspend_timeout_sec: u64) {
+    fn spawn_resume_server(self: Arc<ConnectionManagerMultiple>, address: &str, suspend_timeout_sec: u64) {
         let spawner = self.abortable_system.weak_spawner();
         let address = address.to_owned();
         spawner.spawn(Box::new(
@@ -260,10 +232,7 @@ impl ConnectionManagerMultipleImpl {
         ));
     }
 
-    async fn resume_server(
-        self: Arc<ConnectionManagerMultipleImpl>,
-        address: &str,
-    ) -> Result<(), ConnectionManagerErr> {
+    async fn resume_server(self: Arc<ConnectionManagerMultiple>, address: &str) -> Result<(), ConnectionManagerErr> {
         debug!("Resume address: {}", address);
         let inner = self.inner_state.lock().await;
 
@@ -280,7 +249,7 @@ impl ConnectionManagerMultipleImpl {
     }
 
     async fn connect_to(
-        self: Arc<ConnectionManagerMultipleImpl>,
+        self: Arc<ConnectionManagerMultiple>,
         conn_settings: &ElectrumConnectionSettings,
         weak_spawner: WeakSpawner,
     ) -> Result<(), ConnectionManagerErr> {

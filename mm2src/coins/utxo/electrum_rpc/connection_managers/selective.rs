@@ -13,14 +13,12 @@ use common::log::{debug, error, info, warn};
 
 use super::connection_manager_common::{ConnectionManagerErr, ConnectionManagerTrait, ElectrumConnCtx,
                                        DEFAULT_CONN_TIMEOUT_SEC, SUSPEND_TIMEOUT_INIT_SEC};
-use super::{spawn_electrum, ElectrumClientEvent, ElectrumConnectionSettings, ElectrumConnection};
+use super::{spawn_electrum, ElectrumClientEvent, ElectrumConnection, ElectrumConnectionSettings};
 use mm2_rpc::data::legacy::Priority;
 
-#[derive(Clone, Debug)]
-pub(super) struct ConnectionManagerSelective(Arc<ConnectionManagerSelectiveImpl>);
-
+/// you wanna have a force wake method to wake up suspended servers that were queried specifically
 #[derive(Debug)]
-struct ConnectionManagerSelectiveImpl {
+pub(super) struct ConnectionManagerSelective {
     inner_state: AsyncMutex<ConnectionManagerSelectiveState>,
     abortable_system: AbortableQueue,
     event_sender: futures::channel::mpsc::UnboundedSender<ElectrumClientEvent>,
@@ -36,31 +34,8 @@ struct ConnectionManagerSelectiveState {
     scripthash_subs: HashMap<String, Arc<AsyncMutex<ElectrumConnection>>>,
 }
 
-impl Deref for ConnectionManagerSelective {
-    type Target = dyn ConnectionManagerTrait + Send + Sync;
-
-    fn deref(&self) -> &Self::Target { &self.0 }
-}
-
-impl ConnectionManagerSelective {
-    pub(super) fn try_new(
-        servers: Vec<ElectrumConnectionSettings>,
-        abortable_system: AbortableQueue,
-        event_sender: futures::channel::mpsc::UnboundedSender<ElectrumClientEvent>,
-        scripthash_notification_sender: ScripthashNotificationSender,
-    ) -> Result<Self, String> {
-        let inner = ConnectionManagerSelectiveImpl::try_new(
-            servers,
-            abortable_system,
-            event_sender,
-            scripthash_notification_sender,
-        )?;
-        Ok(ConnectionManagerSelective(Arc::new(inner)))
-    }
-}
-
 #[async_trait]
-impl ConnectionManagerTrait for Arc<ConnectionManagerSelectiveImpl> {
+impl ConnectionManagerTrait for Arc<ConnectionManagerSelective> {
     async fn get_connection(&self) -> Vec<Arc<AsyncMutex<ElectrumConnection>>> {
         debug!("Getting available connection");
         let inner = self.inner_state.lock().await;
@@ -220,13 +195,13 @@ impl ConnectionManagerTrait for Arc<ConnectionManagerSelectiveImpl> {
     }
 }
 
-impl ConnectionManagerSelectiveImpl {
-    fn try_new(
+impl ConnectionManagerSelective {
+    fn try_new_arc(
         servers: Vec<ElectrumConnectionSettings>,
         abortable_system: AbortableQueue,
         event_sender: futures::channel::mpsc::UnboundedSender<ElectrumClientEvent>,
         scripthash_notification_sender: ScripthashNotificationSender,
-    ) -> Result<Self, String> {
+    ) -> Result<Arc<Self>, String> {
         let mut primary_connections = VecDeque::<String>::new();
         let mut backup_connections = VecDeque::<String>::new();
         let mut connection_contexts = HashMap::new();
@@ -250,7 +225,7 @@ impl ConnectionManagerSelectiveImpl {
             });
         }
 
-        Ok(ConnectionManagerSelectiveImpl {
+        Ok(Arc::new(ConnectionManagerSelective {
             event_sender,
             inner_state: AsyncMutex::new(ConnectionManagerSelectiveState {
                 primary_connections,
@@ -261,7 +236,7 @@ impl ConnectionManagerSelectiveImpl {
             }),
             scripthash_notification_sender,
             abortable_system,
-        })
+        }))
     }
 
     async fn fetch_conn_settings(&self) -> Option<(ElectrumConnectionSettings, WeakSpawner)> {
@@ -284,7 +259,7 @@ impl ConnectionManagerSelectiveImpl {
     }
 
     async fn suspend_server(
-        self: Arc<ConnectionManagerSelectiveImpl>,
+        self: Arc<ConnectionManagerSelective>,
         address: String,
     ) -> Result<(), ConnectionManagerErr> {
         debug!(
@@ -319,7 +294,7 @@ impl ConnectionManagerSelectiveImpl {
     }
 
     // workaround to avoid the cycle detected compilation error that blocks recursive async calls
-    fn spawn_resume_server(self: Arc<ConnectionManagerSelectiveImpl>, address: String, suspend_timeout_sec: u64) {
+    fn spawn_resume_server(self: Arc<ConnectionManagerSelective>, address: String, suspend_timeout_sec: u64) {
         let spawner = self.abortable_system.weak_spawner();
         spawner.spawn(Box::new(
             async move {
@@ -331,10 +306,7 @@ impl ConnectionManagerSelectiveImpl {
         ));
     }
 
-    async fn resume_server(
-        self: Arc<ConnectionManagerSelectiveImpl>,
-        address: String,
-    ) -> Result<(), ConnectionManagerErr> {
+    async fn resume_server(self: Arc<ConnectionManagerSelective>, address: String) -> Result<(), ConnectionManagerErr> {
         debug!("Resume address: {}", address);
         let mut inner = self.inner_state.lock().await;
         let priority = inner.get_connection_ctx(&address)?.conn_settings.priority.clone();
