@@ -1501,14 +1501,13 @@ fn test_network_info_negative_time_offset() {
 #[test]
 fn test_unavailable_electrum_proto_version() {
     ElectrumClientImpl::try_new.mock_safe(
-        |client_settings, block_headers_storage, abortable_system, event_sender, scripthash_notification_sender| {
+        |client_settings, block_headers_storage, abortable_system, event_handlers| {
             MockResult::Return(Ok(ElectrumClientImpl::with_protocol_version(
                 client_settings,
-                OrdRange::new(1.8, 1.9).unwrap(),
                 block_headers_storage,
                 abortable_system,
-                event_sender,
-                scripthash_notification_sender,
+                event_handlers,
+                OrdRange::new(1.8, 1.9).unwrap(),
             )))
         },
     );
@@ -1573,7 +1572,6 @@ fn test_one_unavailable_electrum_proto_version() {
     let result = client
         .server_version(
             "electrum-mona.bitbank.cc:50001",
-            "AtomicDEX",
             &OrdRange::new(1.4, 1.4).unwrap(),
         )
         .wait();

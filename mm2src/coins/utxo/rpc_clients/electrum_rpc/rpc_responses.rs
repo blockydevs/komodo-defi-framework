@@ -1,3 +1,9 @@
+use super::super::UnspentInfo;
+use chain::{BlockHeader, BlockHeaderBits, BlockHeaderNonce, OutPoint, Transaction as UtxoTx, TransactionInput,
+            TxHashAlgo};
+use mm2_number::{BigDecimal, BigInt, MmNumber};
+use rpc::v1::types::{Bytes as BytesJson, Transaction as RpcTransaction, H256 as H256Json};
+
 #[derive(Debug, Deserialize)]
 pub struct ElectrumTxHistoryItem {
     pub height: i64,
@@ -11,6 +17,19 @@ pub struct ElectrumUnspent {
     pub tx_hash: H256Json,
     pub tx_pos: u32,
     pub value: u64,
+}
+
+impl From<ElectrumUnspent> for UnspentInfo {
+    fn from(electrum: ElectrumUnspent) -> UnspentInfo {
+        UnspentInfo {
+            outpoint: OutPoint {
+                hash: electrum.tx_hash.reversed().into(),
+                index: electrum.tx_pos,
+            },
+            value: electrum.value,
+            height: electrum.height,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]

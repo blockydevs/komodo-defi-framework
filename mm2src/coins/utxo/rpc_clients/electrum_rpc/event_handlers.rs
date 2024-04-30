@@ -1,34 +1,9 @@
-/// Electrum protocol version verifier.
-/// Once a connection is established, it make's sure it is of the correct version.
-///
-/// FIXME: check the possibility of getting rid of this checked directly after connection
-/// making the caller wait until the version is checked to report back to them if this connection will work or not.
-/// this requires running the connection loop at first (concurrently) to be able to query the version and then decide
-/// whether we want to shut down the connection loop or not.
-struct ElectrumProtoVerifier {
-    // maybe weak instance of ElectrumClient
-}
+use crate::utxo::ScripthashNotification;
+use futures::channel::mpsc::{Receiver as AsyncReceiver, Sender as AsyncSender, UnboundedReceiver, UnboundedSender};
+use serde_json::{self as json, Value as Json};
+use crate::{big_decimal_from_sat_unsigned, NumConversError, RpcTransportEventHandler, RpcTransportEventHandlerShared};
+use super::constants::BLOCKCHAIN_SCRIPTHASH_SUB_ID;
 
-impl RpcTransportEventHandler for ElectrumProtoVerifier {
-    fn debug_info(&self) -> String { "ElectrumProtoVerifier".into() }
-
-    fn on_outgoing_request(&self, _data_len: usize) {}
-
-    fn on_incoming_response(&self, _data_len: usize) {}
-
-    fn on_connected(&self, address: &str) -> Result<(), String> {
-        debug!("Connected to the electrum server: {}", address);
-        // check version using ElectrumClient
-        // best done in another thread to not block the caller.
-        Ok(())
-    }
-
-    fn on_disconnected(&self, address: &str) -> Result<(), String> {
-        debug!("Disconnected from the electrum server: {}", address);
-        // reset protocol version
-        Ok(())
-    }
-}
 
 /// An `RpcTransportEventHandler` that forwards `ScripthashNotification`s to trigger balance updates.
 ///
@@ -70,8 +45,8 @@ struct ElectrumConnectionManagerNotifier {
     connection_manager: Box<dyn ConnectionManagerTrait + Send + Sync>,
 }
 
-impl RpcTransportEventHandler for ElectrumManagerNotifier {
-    fn debug_info(&self) -> String { "ElectrumManagerNotifier".into() }
+impl RpcTransportEventHandler for ElectrumConnectionManagerNotifier {
+    fn debug_info(&self) -> String { "ElectrumConnectionManagerNotifier".into() }
 
     fn on_connected(&self, address: &str) -> Result<(), String> {
         self.connection_manager.on_connected(address);

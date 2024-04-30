@@ -4,7 +4,7 @@ use common::executor::AbortedError;
 use derive_more::Display;
 use futures::lock::Mutex as AsyncMutex;
 use std::fmt::Debug;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use super::{ElectrumConnectionSettings, ElectrumConnection};
 
@@ -34,7 +34,7 @@ pub trait ConnectionManagerTrait: Debug {
     ) -> Result<Arc<AsyncMutex<ElectrumConnection>>, ConnectionManagerErr>;
 
     /// Asynchronously establishes connections to an/a electrum server(s).
-    async fn connect(&self) -> Result<(), ConnectionManagerErr>;
+    async fn connect(&self, weak_client: Weak<ElectrumClientImpl>) -> Result<(), ConnectionManagerErr>;
 
     /// Check if an electrum server is connected
     async fn is_connected(&self) -> bool;

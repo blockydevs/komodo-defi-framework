@@ -3777,6 +3777,9 @@ pub enum CoinProtocol {
 pub type RpcTransportEventHandlerShared = Arc<dyn RpcTransportEventHandler + Send + Sync + 'static>;
 
 /// Common methods to handle the connection events.
+///
+/// Note that the handler methods are sync and shouldn't take long time executing, otherwise it will hurt the performance.
+/// If a handler needs to do some heavy work, it should be spawned/done in a separate thread.
 pub trait RpcTransportEventHandler {
     fn debug_info(&self) -> String;
 
@@ -3796,9 +3799,9 @@ impl fmt::Debug for dyn RpcTransportEventHandler + Send + Sync {
 impl RpcTransportEventHandler for RpcTransportEventHandlerShared {
     fn debug_info(&self) -> String { self.deref().debug_info() }
 
-    fn on_outgoing_request(&self, data_len: usize) { self.as_ref().on_outgoing_request(data_len) }
+    fn on_outgoing_request(&self, data: &[u8]) { self.as_ref().on_outgoing_request(data) }
 
-    fn on_incoming_response(&self, data_len: usize) { self.as_ref().on_incoming_response(data_len) }
+    fn on_incoming_response(&self, data: &[u8]) { self.as_ref().on_incoming_response(data) }
 
     fn on_connected(&self, address: &str) -> Result<(), String> { self.as_ref().on_connected(address) }
 
@@ -3811,15 +3814,15 @@ impl<T: RpcTransportEventHandler> RpcTransportEventHandler for Vec<T> {
         format!("{:?}", selfi)
     }
 
-    fn on_outgoing_request(&self, data_len: usize) {
+    fn on_outgoing_request(&self, data: &[u8]) {
         for handler in self {
-            handler.on_outgoing_request(data_len)
+            handler.on_outgoing_request(data)
         }
     }
 
-    fn on_incoming_response(&self, data_len: usize) {
+    fn on_incoming_response(&self, data: &[u8]) {
         for handler in self {
-            handler.on_incoming_response(data_len)
+            handler.on_incoming_response(data)
         }
     }
 

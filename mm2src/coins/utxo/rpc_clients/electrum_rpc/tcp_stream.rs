@@ -1,12 +1,28 @@
+use futures::future::Either;
+use futures::io::Error;
+use http::header::AUTHORIZATION;
+use http::{Request, StatusCode};
+use rustls::client::ServerCertVerified;
+use rustls::{Certificate, ClientConfig, ServerName, OwnedTrustAnchor, RootCertStore};
+use serde_json::{self as json, Value as Json};
+use std::convert::TryFrom;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use std::time::SystemTime;
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf};
+use tokio::net::TcpStream;
+use tokio_rustls::{client::TlsStream, TlsConnector};
+use tokio_rustls::webpki::DnsNameRef;
+use webpki_roots::TLS_SERVER_ROOTS;
+use std::sync::Arc;
+
 /// The enum wrapping possible variants of underlying Streams
-#[cfg(not(target_arch = "wasm32"))]
 #[allow(clippy::large_enum_variant)]
 enum ElectrumStream {
     Tcp(TcpStream),
     Tls(TlsStream<TcpStream>),
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl AsRef<TcpStream> for ElectrumStream {
     fn as_ref(&self) -> &TcpStream {
         match self {
@@ -16,7 +32,6 @@ impl AsRef<TcpStream> for ElectrumStream {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl AsyncRead for ElectrumStream {
     fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
         match self.get_mut() {
@@ -26,7 +41,6 @@ impl AsyncRead for ElectrumStream {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl AsyncWrite for ElectrumStream {
     fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
         match self.get_mut() {
@@ -50,7 +64,24 @@ impl AsyncWrite for ElectrumStream {
     }
 }
 
+/// Skips the server certificate verification on TLS connection
+pub struct NoCertificateVerification {}
+
 #[cfg(not(target_arch = "wasm32"))]
+impl rustls::client::ServerCertVerifier for NoCertificateVerification {
+    fn verify_server_cert(
+        &self,
+        _: &Certificate,
+        _: &[Certificate],
+        _: &ServerName,
+        _: &mut dyn Iterator<Item = &[u8]>,
+        _: &[u8],
+        _: SystemTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::ServerCertVerified::assertion())
+    }
+}
+
 fn rustls_client_config(unsafe_conf: bool) -> Arc<ClientConfig> {
     let mut cert_store = RootCertStore::empty();
 
@@ -74,7 +105,6 @@ fn rustls_client_config(unsafe_conf: bool) -> Arc<ClientConfig> {
     Arc::new(tls_config)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 lazy_static! {
     static ref SAFE_TLS_CONFIG: Arc<ClientConfig> = rustls_client_config(false);
     static ref UNSAFE_TLS_CONFIG: Arc<ClientConfig> = rustls_client_config(true);

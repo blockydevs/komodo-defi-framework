@@ -1,9 +1,8 @@
 #![cfg_attr(target_arch = "wasm32", allow(unused_macros))]
 #![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 
-mod connection_manager_common;
-mod connection_manager_multiple;
-mod connection_manager_selective;
+mod electrum_rpc;
+pub use electrum_rpc::*;
 
 use crate::utxo::ScripthashNotification;
 use async_trait::async_trait;
@@ -59,9 +58,6 @@ use mm2_err_handle::prelude::*;
 use mm2_number::{BigDecimal, BigInt, MmNumber};
 use mm2_rpc::data::legacy::{ElectrumProtocol, Priority};
 
-use crate::utxo::rpc_clients::connection_manager_common::{ConnectionManagerErr, ConnectionManagerTrait};
-use crate::utxo::rpc_clients::connection_manager_multiple::ConnectionManagerMultiple;
-use crate::utxo::rpc_clients::connection_manager_selective::ConnectionManagerSelective;
 use crate::utxo::utxo_block_header_storage::BlockHeaderStorage;
 use crate::utxo::{output_script, sat_from_big_decimal, GetBlockHeaderError, GetConfirmedTxError, GetTxError,
                   GetTxHeightError};
@@ -92,36 +88,13 @@ const RESPONSE_TOO_LARGE_CODE: i16 = -32600;
 const TX_NOT_FOUND_RETRIES: u8 = 10;
 
 pub type AddressesByLabelResult = HashMap<String, AddressPurpose>;
-pub type JsonRpcPendingRequestsShared = Arc<AsyncMutex<JsonRpcPendingRequests>>;
-pub type JsonRpcPendingRequests = HashMap<JsonRpcId, async_oneshot::Sender<JsonRpcResponseEnum>>;
 pub type UnspentMap = HashMap<Address, Vec<UnspentInfo>>;
 
-type ElectrumTxHistory = Vec<ElectrumTxHistoryItem>;
-type ElectrumScriptHash = String;
-type ScriptHashUnspents = Vec<ElectrumUnspent>;
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 pub struct AddressPurpose {
     purpose: String,
-}
-
-/// Skips the server certificate verification on TLS connection
-pub struct NoCertificateVerification {}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl rustls::client::ServerCertVerifier for NoCertificateVerification {
-    fn verify_server_cert(
-        &self,
-        _: &Certificate,
-        _: &[Certificate],
-        _: &ServerName,
-        _: &mut dyn Iterator<Item = &[u8]>,
-        _: &[u8],
-        _: SystemTime,
-    ) -> Result<ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::ServerCertVerified::assertion())
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -262,18 +235,7 @@ pub struct UnspentInfo {
     pub height: Option<u64>,
 }
 
-impl From<ElectrumUnspent> for UnspentInfo {
-    fn from(electrum: ElectrumUnspent) -> UnspentInfo {
-        UnspentInfo {
-            outpoint: OutPoint {
-                hash: electrum.tx_hash.reversed().into(),
-                index: electrum.tx_pos,
-            },
-            value: electrum.value,
-            height: electrum.height,
-        }
-    }
-}
+
 
 #[derive(Debug, PartialEq)]
 pub enum BlockHashOrHeight {

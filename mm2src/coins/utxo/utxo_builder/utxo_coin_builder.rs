@@ -9,7 +9,8 @@ use crate::utxo::{output_script, utxo_common, ElectrumBuilderArgs, RecentlySpent
                   ScripthashNotificationSender, TxFee, UtxoCoinConf, UtxoCoinFields, UtxoHDAccount, UtxoHDWallet,
                   UtxoRpcMode, UtxoSyncStatus, UtxoSyncStatusLoopHandle, DEFAULT_GAP_LIMIT, UTXO_DUST_AMOUNT};
 use crate::{BlockchainNetwork, CoinTransportMetrics, DerivationMethod, HistorySyncState, IguanaPrivKey,
-            PrivKeyBuildPolicy, PrivKeyPolicy, PrivKeyPolicyNotAllowed, RpcClientType, UtxoActivationParams};
+            PrivKeyBuildPolicy, PrivKeyPolicy, PrivKeyPolicyNotAllowed, RpcClientType, RpcTransportEventHandler,
+            UtxoActivationParams};
 
 use async_trait::async_trait;
 use chain::TxHashAlgo;
@@ -57,11 +58,6 @@ pub enum UtxoCoinBuildError {
     ErrorDetectingFeeMethod(String),
     ErrorDetectingDecimals(String),
     InvalidBlockchainNetwork(String),
-    #[display(
-        fmt = "Failed to connect to at least 1 of {:?} in {} seconds.",
-        electrum_servers,
-        seconds
-    )]
     #[display(fmt = "Can not detect the user home directory")]
     CantDetectUserHome,
     #[display(fmt = "Private key policy is not allowed: {}", _0)]
@@ -548,7 +544,7 @@ pub trait UtxoCoinBuilderCommonOps {
     ) -> UtxoCoinBuildResult<ElectrumClient> {
         let coin_ticker = self.ticker().to_owned();
         let ctx = self.ctx();
-        let mut event_handlers = vec![];
+        let mut event_handlers: Vec<Box<dyn RpcTransportEventHandler>> = vec![];
         if args.collect_metrics {
             event_handlers.push(Box::new(CoinTransportMetrics::new(
                 ctx.metrics.weak(),
@@ -582,6 +578,7 @@ pub trait UtxoCoinBuilderCommonOps {
             scripthash_notification_sender,
             args.spawn_ping,
         )
+        .await
         .map_to_mm(UtxoCoinBuildError::Internal)
     }
 
