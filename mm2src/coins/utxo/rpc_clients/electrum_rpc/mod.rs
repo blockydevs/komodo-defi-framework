@@ -1,16 +1,16 @@
 use sha2::{Digest, Sha256};
 
-mod constants;
 mod client;
 mod connection;
 mod connection_managers;
+mod constants;
 mod event_handlers;
 mod rpc_responses;
 mod tcp_stream;
 
-pub use constants::*;
-pub use client::ElectrumClient;
+pub use client::{ElectrumClient, ElectrumClientImpl, ElectrumClientSettings};
 pub use connection::{ElectrumConnection, ElectrumConnectionSettings};
+pub use constants::*;
 
 #[inline]
 pub fn electrum_script_hash(script: &[u8]) -> Vec<u8> {

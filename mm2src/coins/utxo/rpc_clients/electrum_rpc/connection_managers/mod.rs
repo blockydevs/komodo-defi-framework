@@ -6,7 +6,7 @@ use futures::lock::Mutex as AsyncMutex;
 use std::fmt::Debug;
 use std::sync::{Arc, Weak};
 
-use super::{ElectrumConnectionSettings, ElectrumConnection};
+use super::{ElectrumConnectionSettings, ElectrumConnection, ElectrumClientImpl};
 
 /// This timeout implies both connecting and verifying phases time
 pub const DEFAULT_CONN_TIMEOUT_SEC: u64 = 20;

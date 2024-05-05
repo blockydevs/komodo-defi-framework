@@ -358,7 +358,7 @@ async fn send_request(
 
     let (notification_sender, notification_receiver) = oneshot::channel::<Vec<u8>>();
 
-    event_handlers.on_outgoing_request(serialized_request.len());
+    event_handlers.on_outgoing_request(serialized_request.as_bytes());
 
     tx.send(ControllerMessage::Request(WsRequest {
         request_id,

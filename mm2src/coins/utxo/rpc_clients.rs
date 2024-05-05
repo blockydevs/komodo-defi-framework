@@ -746,7 +746,7 @@ impl JsonRpcClient for NativeClientImpl {
         let request_body =
             try_f!(json::to_string(&request).map_err(|e| JsonRpcErrorType::InvalidRequest(e.to_string())));
         // measure now only body length, because the `hyper` crate doesn't allow to get total HTTP packet length
-        self.event_handlers.on_outgoing_request(request_body.len());
+        self.event_handlers.on_outgoing_request(request_body.as_bytes());
 
         let uri = self.uri.clone();
         let auth = self.auth.clone();

@@ -49,12 +49,12 @@ type ElectrumScriptHash = String;
 type ScriptHashUnspents = Vec<ElectrumUnspent>;
 
 #[derive(Debug)]
-pub(super) struct ElectrumClientSettings {
-    pub(super) client_name: String,
-    pub(super) servers: Vec<ElectrumConnectionSettings>,
-    pub(super) coin_ticker: String,
-    pub(super) negotiate_version: bool,
-    pub(super) connection_manager_policy: ConnectionManagerPolicy,
+pub struct ElectrumClientSettings {
+    client_name: String,
+    servers: Vec<ElectrumConnectionSettings>,
+    coin_ticker: String,
+    negotiate_version: bool,
+    connection_manager_policy: ConnectionManagerPolicy,
 }
 
 #[derive(Debug)]
@@ -74,7 +74,7 @@ pub struct ElectrumClientImpl {
     /// Event handlers that are triggered on (dis)connection & transport events. They are wrapped
     /// in an `Arc` since they are shared outside `ElectrumClientImpl`. They are handed to each active
     /// `ElectrumConnection` to notify them about the events.
-    event_handlers: Arc<Vec<Box<dyn RpcTransportEventHandler>>>,
+    event_handlers: Arc<Vec<Box<dyn RpcTransportEventHandler + Send + Sync>>>,
     abortable_system: AbortableQueue,
 }
 
@@ -84,7 +84,7 @@ impl ElectrumClientImpl {
         client_settings: ElectrumClientSettings,
         block_headers_storage: BlockHeaderStorage,
         abortable_system: AbortableQueue,
-        mut event_handlers: Vec<Box<dyn RpcTransportEventHandler>>,
+        mut event_handlers: Vec<Box<dyn RpcTransportEventHandler + Send + Sync>>,
     ) -> Result<ElectrumClientImpl, String> {
         let sub_abortable_system = abortable_system
             .create_subsystem()
@@ -180,7 +180,7 @@ impl ElectrumClientImpl {
     pub fn negotiate_version(&self) -> bool { self.negotiate_version }
 
     /// Get the event handlers.
-    pub fn event_handlers(&self) -> Arc<Vec<Box<dyn RpcTransportEventHandler>>> { self.event_handlers.clone() }
+    pub fn event_handlers(&self) -> Arc<Vec<Box<dyn RpcTransportEventHandler + Send + Sync>>> { self.event_handlers.clone() }
 
     /// Get block headers storage.
     pub fn block_headers_storage(&self) -> &BlockHeaderStorage { &self.block_headers_storage }
@@ -192,7 +192,7 @@ impl ElectrumClientImpl {
         client_settings: ElectrumClientSettings,
         block_headers_storage: BlockHeaderStorage,
         abortable_system: AbortableQueue,
-        event_handlers: Vec<Box<dyn RpcTransportEventHandler>>,
+        event_handlers: Vec<Box<dyn RpcTransportEventHandler + Send + Sync>>,
         protocol_version: OrdRange<f32>,
     ) -> ElectrumClientImpl {
         ElectrumClientImpl {
@@ -204,7 +204,7 @@ impl ElectrumClientImpl {
 }
 
 #[derive(Clone, Debug)]
-pub struct ElectrumClient(Arc<ElectrumClientImpl>);
+pub struct ElectrumClient(pub Arc<ElectrumClientImpl>);
 
 impl Deref for ElectrumClient {
     type Target = ElectrumClientImpl;
@@ -245,7 +245,7 @@ impl JsonRpcMultiClient for ElectrumClient {
 impl ElectrumClient {
     pub async fn try_new(
         client_settings: ElectrumClientSettings,
-        mut event_handlers: Vec<Box<dyn RpcTransportEventHandler>>,
+        mut event_handlers: Vec<Box<dyn RpcTransportEventHandler + Send + Sync>>,
         block_headers_storage: BlockHeaderStorage,
         abortable_system: AbortableQueue,
         scripthash_notification_sender: Option<UnboundSender<ScripthashNotification>>,

@@ -278,7 +278,7 @@ pub(crate) async fn block_header_utxo_loop(
 
     let (mut electrum_addresses, mut block_count) = match weak.upgrade() {
         Some(client) => {
-            let client = ElectrumClient { client_impl: client };
+            let client = ElectrumClient(client);
             match client.get_servers_with_latest_block_count().compat().await {
                 Ok((electrum_addresses, block_count)) => (electrum_addresses, block_count),
                 Err(err) => {
@@ -294,14 +294,14 @@ pub(crate) async fn block_header_utxo_loop(
     };
     let mut args = BlockHeaderUtxoLoopExtraArgs::default();
     while let Some(client) = weak.upgrade() {
-        let client = &ElectrumClient { client_impl: client };
+        let client = ElectrumClient(client);
         let ticker = client.coin_name();
 
         let storage = client.block_headers_storage();
         let last_height_in_storage = match storage.get_last_block_height().await {
             Ok(Some(height)) => height,
             Ok(None) => {
-                if let Err(err) = validate_and_store_starting_header(client, ticker, storage, &spv_conf).await {
+                if let Err(err) = validate_and_store_starting_header(&client, ticker, storage, &spv_conf).await {
                     sync_status_loop_handle.notify_on_permanent_error(err);
                     break;
                 }
@@ -373,7 +373,7 @@ pub(crate) async fn block_header_utxo_loop(
         };
         let (block_registry, block_headers) = match try_to_retrieve_headers_until_success(
             &mut args,
-            client,
+            &client,
             server_address,
             last_height_in_storage + 1,
             retrieve_to,
@@ -412,7 +412,7 @@ pub(crate) async fn block_header_utxo_loop(
             } = &err
             {
                 match resolve_possible_chain_reorg(
-                    client,
+                    &client,
                     server_address,
                     &mut args,
                     last_height_in_storage,

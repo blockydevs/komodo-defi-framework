@@ -119,7 +119,7 @@ async fn send_request(request: Call, transport: HttpTransport) -> Result<Json, E
         };
     }
 
-    transport.event_handlers.on_outgoing_request(serialized_request.len());
+    transport.event_handlers.on_outgoing_request(serialized_request.as_bytes());
 
     let mut req = http::Request::new(serialized_request.into_bytes());
     *req.method_mut() = http::Method::POST;
@@ -219,7 +219,7 @@ async fn send_request_once(
     use mm2_net::wasm::http::FetchRequest;
 
     // account for outgoing traffic
-    event_handlers.on_outgoing_request(request_payload.len());
+    event_handlers.on_outgoing_request(request_payload.as_bytes());
 
     let (status_code, response_str) = FetchRequest::post(&uri.to_string())
         .cors()

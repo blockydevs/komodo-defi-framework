@@ -107,7 +107,9 @@ impl ElectrumConnection {
         }
     }
 
-    async fn address(&self) -> &str { &self.settings.url }
+    fn address(&self) -> &str { &self.settings.url }
+
+    fn weak_spawner(&self) -> WeakSpawner { self.abortable_system.weak_spawner() }
 
     async fn set_protocol_version(&self, version: f32) { self.protocol_version.lock().await.replace(version); }
 
@@ -401,13 +403,14 @@ impl ElectrumConnection {
 
         // Start the connection loop on a weak spawner.
         let spawner = connection.weak_spawner();
+        let address = address.clone();
         let connection = connection.clone();
         let event_handlers = event_handlers.clone();
         spawner.spawn(async move {
             let err = select! {
-                _ = no_connection_timeout => (),
-                _ = recv_f => (),
-                _ = send_f => (),
+                e = no_connection_timeout => e,
+                e = recv_f => e,
+                e = send_f => e,
             };
 
             error!("{address} connection dropped due to: {err:?}");
@@ -417,8 +420,14 @@ impl ElectrumConnection {
         });
 
         // FIXME: Use the remainder of the connection timeout here.
-        match client.server_version(address, client.protocol_version()).compat().await {
+        match client.server_version(&address, client.protocol_version()).compat().await {
+            Err(e) => disconnect_and_return_error!(ElectrumConnectionErr::Temporary(format!(
+                "Error querying electrum server version {e:?}"
+            ))),
             Ok(version_str) => match version_str.protocol_version.parse::<f32>() {
+                Err(e) => disconnect_and_return_error!(ElectrumConnectionErr::Irrecoverable(format!(
+                    "Failed to parse electrum server version {e:?}"
+                ))),
                 Ok(version_f32) => {
                     if client.negotiate_version() {
                         let client_version_range = client.protocol_version().clone();
@@ -430,13 +439,7 @@ impl ElectrumConnection {
                         }
                     }
                 },
-                Err(e) => disconnect_and_return_error!(ElectrumConnectionErr::Temporary(format!(
-                    "Failed to parse electrum server version {e:?}"
-                ))),
             },
-            Err(e) => disconnect_and_return_error!(ElectrumConnectionErr::Temporary(format!(
-                "Error querying electrum server version {e:?}"
-            ))),
         };
 
         return Ok(());
