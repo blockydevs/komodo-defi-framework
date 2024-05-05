@@ -3,22 +3,23 @@ use futures::io::Error;
 use http::header::AUTHORIZATION;
 use http::{Request, StatusCode};
 use rustls::client::ServerCertVerified;
-use rustls::{Certificate, ClientConfig, ServerName, OwnedTrustAnchor, RootCertStore};
+use rustls::{Certificate, ClientConfig, OwnedTrustAnchor, RootCertStore, ServerName};
 use serde_json::{self as json, Value as Json};
 use std::convert::TryFrom;
+use std::io;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::SystemTime;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf};
 use tokio::net::TcpStream;
-use tokio_rustls::{client::TlsStream, TlsConnector};
 use tokio_rustls::webpki::DnsNameRef;
+use tokio_rustls::{client::TlsStream, TlsConnector};
 use webpki_roots::TLS_SERVER_ROOTS;
-use std::sync::Arc;
 
 /// The enum wrapping possible variants of underlying Streams
 #[allow(clippy::large_enum_variant)]
-enum ElectrumStream {
+pub enum ElectrumStream {
     Tcp(TcpStream),
     Tls(TlsStream<TcpStream>),
 }
@@ -106,6 +107,6 @@ fn rustls_client_config(unsafe_conf: bool) -> Arc<ClientConfig> {
 }
 
 lazy_static! {
-    static ref SAFE_TLS_CONFIG: Arc<ClientConfig> = rustls_client_config(false);
-    static ref UNSAFE_TLS_CONFIG: Arc<ClientConfig> = rustls_client_config(true);
+    pub static ref SAFE_TLS_CONFIG: Arc<ClientConfig> = rustls_client_config(false);
+    pub static ref UNSAFE_TLS_CONFIG: Arc<ClientConfig> = rustls_client_config(true);
 }

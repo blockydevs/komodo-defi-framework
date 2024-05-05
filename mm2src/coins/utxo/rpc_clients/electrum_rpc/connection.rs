@@ -1,4 +1,5 @@
 pub type JsonRpcPendingRequests = HashMap<JsonRpcId, async_oneshot::Sender<JsonRpcResponseEnum>>;
+use serde::Serialize;
 use serde_json::{self as json, Value as Json};
 
 use common::log::{debug, error, info, warn};
@@ -21,40 +22,42 @@ cfg_native! {
     use webpki_roots::TLS_SERVER_ROOTS;
 }
 use super::super::*;
-use crate::{big_decimal_from_sat_unsigned, NumConversError, RpcTransportEventHandler, RpcTransportEventHandlerShared};
+use crate::{big_decimal_from_sat_unsigned, NumConversError, RpcTransportEventHandler, RpcTransportEventHandlerShared,
+            SharableRpcTransportEventHandler};
 
 macro_rules! log_and_return {
-    ($typ:tt, $e:expr) => {{
-        let err = ElectrumConnectionErr::$typ($e.to_string());
-        // Assuming there is an `address` variable in the scope.
-        error!("{address} {err:?}");
+    ($typ:tt, $err:expr, $addr:expr) => {{
+        let err = ElectrumConnectionErr::$typ($err.to_string());
+        error!("{} {:?}", $addr, err);
         return Err(err);
     }};
 }
 
 macro_rules! log_and_return_if_err {
-    ($ex:expr, $typ:tt) => {{
+    ($ex:expr, $typ:tt, $addr:expr) => {{
         match $ex {
             Ok(res) => res,
             Err(e) => {
-                log_and_return!($typ, e);
+                log_and_return!($typ, e, $addr);
             },
         }
     }};
 }
 
 macro_rules! disconnect_and_return_error {
-    ($err:expr) => {{
-        error!("{address} connection dropped due to: {:?}", $err);
-        event_handlers.on_disconnected(&address);
-        connection.disconnect(Some($err)).await;
+    ($err:expr, $addr:expr, $connection:expr, $event_handlers:expr) => {{
+        error!("{} connection dropped due to: {:?}", $addr, $err);
+        // Inform the event handlers of the disconnection.
+        $event_handlers.on_disconnected(&$addr);
+        // Disconnect the connection.
+        $connection.disconnect(Some($err.clone())).await;
         return Err($err);
     }};
 }
 
 /// Helper function casting mpsc::Receiver as Stream.
 fn rx_to_stream(rx: mpsc::Receiver<Vec<u8>>) -> impl Stream<Item = Vec<u8>, Error = io::Error> {
-    rx.expect("errors not possible on rx")
+    rx.map_err(|_| panic!("errors not possible on rx"))
 }
 
 /// Electrum request RPC representation
@@ -70,7 +73,7 @@ pub struct ElectrumConnectionSettings {
     pub timeout_sec: Option<u64>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum ElectrumConnectionErr {
     Timeout(f32),
     Temporary(String),
@@ -107,13 +110,13 @@ impl ElectrumConnection {
         }
     }
 
-    fn address(&self) -> &str { &self.settings.url }
+    pub fn address(&self) -> &str { &self.settings.url }
 
     fn weak_spawner(&self) -> WeakSpawner { self.abortable_system.weak_spawner() }
 
     async fn set_protocol_version(&self, version: f32) { self.protocol_version.lock().await.replace(version); }
 
-    async fn get_protocol_version(&self) -> Option<f32> { self.protocol_version.lock().await }
+    async fn get_protocol_version(&self) -> Option<f32> { *self.protocol_version.lock().await }
 
     async fn is_connected(&self) -> bool { self.tx.lock().await.is_some() }
 
@@ -130,14 +133,14 @@ impl ElectrumConnection {
         self.tx.lock().await.take();
         self.responses.lock().await.clear();
         self.protocol_version.lock().await.take();
-        self.last_error.lock().await = err;
-        self.abortable_system.abort_all().await;
+        *self.last_error.lock().await = reason;
+        self.abortable_system.abort_all();
     }
 
     /// Sends a request to the electrum server and waits for the response.
     ///
     /// ## Important: This should always return [`JsonRpcErrorType::Transport`] error.
-    async fn electrum_request(
+    pub async fn electrum_request(
         &self,
         mut req_json: String,
         rpc_id: JsonRpcId,
@@ -157,12 +160,13 @@ impl ElectrumConnection {
             .tx
             .lock()
             .await
-            .ok_or_else(|| JsonRpcErrorType::Transport("Connection is not established".to_string()))?
             // Clone to not to hold the lock while sending the request.
-            .clone();
+            .clone()
+            .ok_or_else(|| JsonRpcErrorType::Transport("Connection is not established".to_string()))?;
 
         // Send the request to the electrum server.
         tx.send(req_json.into_bytes())
+            .compat()
             .await
             .map_err(|e| JsonRpcErrorType::Transport(e.to_string()))?;
 
@@ -170,12 +174,20 @@ impl ElectrumConnection {
         res_rx
             .timeout(Duration::from_secs(timeout))
             .await
-            .map_err(|e| JsonRpcErrorType::Transport(e.to_string()))
+            .map_err(|e| JsonRpcErrorType::Transport(e.to_string()))?
+            .map_err(|e| JsonRpcErrorType::Transport("The sender didn't send".to_string()))
     }
 
     /// Process an incoming JSONRPC response from the electrum server.
-    async fn process_electrum_response(&self, raw_json: Json, event_handlers: &Vec<Box<dyn RpcTransportEventHandler>>) {
-        event_handlers.on_incoming_response(raw_json.as_bytes());
+    async fn process_electrum_response(
+        &self,
+        raw_json: Json,
+        event_handlers: &Vec<Box<SharableRpcTransportEventHandler>>,
+    ) {
+        // Inform the event handlers.
+        if let Ok(ref data) = json::to_vec(&raw_json) {
+            event_handlers.on_incoming_response(data);
+        }
 
         // detect if we got standard JSONRPC response or subscription response as JSONRPC request
         #[derive(Deserialize)]
@@ -235,7 +247,7 @@ impl ElectrumConnection {
     async fn process_electrum_bulk_response(
         &self,
         bulk_response: &[u8],
-        event_handlers: &Vec<Box<dyn RpcTransportEventHandler>>,
+        event_handlers: &Vec<Box<SharableRpcTransportEventHandler>>,
     ) {
         // We should split the received response because we can get several responses in bulk.
         let responses = bulk_response.split(|item| *item == b'\n');
@@ -268,14 +280,14 @@ impl ElectrumConnection {
         let address = connection.address().to_string();
 
         let socket_addr = match address.to_socket_addrs() {
-            Ok(addr) => match addr.next() {
-                Some(addr) => Ok(addr),
+            Ok(mut addr) => match addr.next() {
+                Some(addr) => addr,
                 None => {
-                    log_and_return!(Irrecoverable, "Address resolved to None.");
+                    log_and_return!(Irrecoverable, "Address resolved to None.", address);
                 },
             },
             Err(e) => {
-                log_and_return!(Irrecoverable, format!("Resolve error in address: {e:?}"));
+                log_and_return!(Irrecoverable, format!("Resolve error in address: {e:?}"), address);
             },
         };
 
@@ -283,15 +295,21 @@ impl ElectrumConnection {
         let connect_f = match connection.settings.protocol {
             ElectrumProtocol::TCP => Either::Left(TcpStream::connect(&socket_addr).map_ok(ElectrumStream::Tcp)),
             ElectrumProtocol::SSL => {
-                let uri: Uri = address
-                    .parse()
-                    .map_err(|e| log_and_return!(Irrecoverable, format!("URL parse error: {e:?}")))?;
-                let dns_name = uri.host().ok_or_else(|| {
-                    log_and_return!(Irrecoverable, "Couldn't retrieve host from addr");
-                })?;
+                let uri: Uri = match address.parse() {
+                    Ok(uri) => uri,
+                    Err(e) => {
+                        log_and_return!(Irrecoverable, format!("URL parse error: {e:?}"), address);
+                    },
+                };
+
+                let Some(dns_name) = uri.host().map(String::from) else {
+                    log_and_return!(Irrecoverable, "Couldn't retrieve host from addr", address);
+                };
+
                 // Make sure that the host is a valid DNS name.
-                DnsNameRef::try_from_ascii_str(dns_name)
-                    .map_err(|e| log_and_return!(Irrecoverable, format!("Invalid DNS name: {e:?}")))?;
+                if let Err(e) = DnsNameRef::try_from_ascii_str(dns_name.as_str()) {
+                    log_and_return!(Irrecoverable, format!("Invalid DNS name: {e:?}"), address)
+                }
 
                 let tls_connector = if connection.settings.disable_cert_verification {
                     TlsConnector::from(UNSAFE_TLS_CONFIG.clone())
@@ -311,7 +329,8 @@ impl ElectrumConnection {
             ElectrumProtocol::WS | ElectrumProtocol::WSS => {
                 log_and_return!(
                     Irrecoverable,
-                    "WS and WSS protocols are not supported yet. Consider using TCP or SSL"
+                    "WS and WSS protocols are not supported yet. Consider using TCP or SSL",
+                    address
                 );
             },
         };
@@ -319,8 +338,8 @@ impl ElectrumConnection {
         let mut timeout = connection.settings.timeout_sec.unwrap_or(ELECTRUM_TIMEOUT_SEC);
         // FIXME: Add a timeout for connection establishment.
         // Use what's left of the timeout to query for the server version.
-        let stream = log_and_return_if_err!(connect_f.await, Temporary);
-        log_and_return_if_err!(stream.as_ref().set_nodelay(true), Temporary);
+        let stream = log_and_return_if_err!(connect_f.await, Temporary, address);
+        log_and_return_if_err!(stream.as_ref().set_nodelay(true), Temporary, address);
 
         match secure_connection {
             true => info!("Electrum client connected to {address} securely"),
@@ -365,8 +384,6 @@ impl ElectrumConnection {
                             if c == 0 {
                                 break ElectrumConnectionErr::Temporary("EOF".to_string());
                             }
-                            // Reset the delay if we've connected successfully and only if we received some data from connection.
-                            delay.store(0, AtomicOrdering::Relaxed);
                         },
                         // FIXME: Fine grain the possible errors here, some of them might be irrecoverable?
                         Err(e) => {
@@ -387,13 +404,13 @@ impl ElectrumConnection {
         let send_f = {
             let address = address.clone();
             let event_handlers = event_handlers.clone();
-            let mut rx = rx.rx_to_stream(rx).compat();
+            let mut rx = rx_to_stream(rx).compat();
             async move {
                 while let Some(Ok(bytes)) = rx.next().await {
                     if let Err(e) = write.write_all(&bytes).await {
                         error!("Write error {e} to {address}");
                     } else {
-                        event_handlers.on_outgoing_request(&bytes);
+                        event_handlers.deref().on_outgoing_request(&bytes);
                     }
                 }
                 ElectrumConnectionErr::Temporary("Sender disconnected".to_string())
@@ -402,46 +419,62 @@ impl ElectrumConnection {
         let mut send_f = Box::pin(send_f).fuse();
 
         // Start the connection loop on a weak spawner.
-        let spawner = connection.weak_spawner();
-        let address = address.clone();
-        let connection = connection.clone();
-        let event_handlers = event_handlers.clone();
-        spawner.spawn(async move {
-            let err = select! {
-                e = no_connection_timeout => e,
-                e = recv_f => e,
-                e = send_f => e,
-            };
+        let connection_loop = {
+            let address = address.clone();
+            let connection = connection.clone();
+            let event_handlers = event_handlers.clone();
+            async move {
+                let err = select! {
+                    e = no_connection_timeout => e,
+                    e = recv_f => e,
+                    e = send_f => e,
+                };
 
-            error!("{address} connection dropped due to: {err:?}");
-            event_handlers.on_disconnected(&address);
-            // DISCUSS: This will call abort all spawned tasks. INCLUDING THIS ONE WE ARE RUNNING OFF OF.
-            connection.disconnect(Some(err)).await;
-        });
+                error!("{address} connection dropped due to: {err:?}");
+                event_handlers.on_disconnected(&address);
+                // DISCUSS: This will call abort all spawned tasks. INCLUDING THIS ONE WE ARE RUNNING OFF OF.
+                connection.disconnect(Some(err)).await;
+            }
+        };
+        connection.weak_spawner().spawn(connection_loop);
 
         // FIXME: Use the remainder of the connection timeout here.
-        match client.server_version(&address, client.protocol_version()).compat().await {
-            Err(e) => disconnect_and_return_error!(ElectrumConnectionErr::Temporary(format!(
-                "Error querying electrum server version {e:?}"
-            ))),
+        let version = match client
+            .server_version(&address, client.protocol_version())
+            .compat()
+            .await
+        {
+            Err(e) => disconnect_and_return_error!(
+                ElectrumConnectionErr::Temporary(format!("Error querying electrum server version {e:?}")),
+                address,
+                connection,
+                event_handlers
+            ),
             Ok(version_str) => match version_str.protocol_version.parse::<f32>() {
-                Err(e) => disconnect_and_return_error!(ElectrumConnectionErr::Irrecoverable(format!(
-                    "Failed to parse electrum server version {e:?}"
-                ))),
+                Err(e) => disconnect_and_return_error!(
+                    ElectrumConnectionErr::Irrecoverable(format!("Failed to parse electrum server version {e:?}")),
+                    address,
+                    connection,
+                    event_handlers
+                ),
                 Ok(version_f32) => {
                     if client.negotiate_version() {
-                        let client_version_range = client.protocol_version().clone();
+                        let client_version_range = client.protocol_version();
                         if !client_version_range.contains(&version_f32) {
-                            disconnect_and_return_error!(ElectrumConnectionErr::VersionMismatch(
-                                client_version_range,
-                                version_f32
-                            ))
+                            disconnect_and_return_error!(
+                                ElectrumConnectionErr::VersionMismatch(client_version_range.clone(), version_f32),
+                                address,
+                                connection,
+                                event_handlers
+                            )
                         }
                     }
+                    version_f32
                 },
             },
         };
 
+        connection.set_protocol_version(version).await;
         return Ok(());
     }
 }

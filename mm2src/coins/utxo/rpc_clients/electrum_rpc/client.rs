@@ -9,22 +9,25 @@ use common::jsonrpc_client::{JsonRpcBatchClient, JsonRpcBatchResponse, JsonRpcCl
 use common::log::{debug, error, info, warn};
 use common::{median, now_float, now_ms, now_sec, small_rng, OrdRange};
 use connection_managers::ConnectionManagerTrait;
+use futures::channel::mpsc::{Receiver as AsyncReceiver, Sender as AsyncSender, UnboundedReceiver, UnboundedSender};
 use mm2_core::ConnectionManagerPolicy;
 use mm2_err_handle::prelude::*;
 use mm2_number::{BigDecimal, BigInt, MmNumber};
 use mm2_rpc::data::legacy::{ElectrumProtocol, Priority};
 use serde_json::{self as json, Value as Json};
 
+use std::sync::{Arc, Weak};
+
 use super::super::*;
-use super::*;
-use super::rpc_responses::*;
 use super::event_handlers::*;
+use super::rpc_responses::*;
+use super::*;
 
 use crate::utxo::rpc_clients::ConcurrentRequestMap;
 use crate::utxo::utxo_block_header_storage::BlockHeaderStorage;
 use crate::utxo::{output_script, sat_from_big_decimal, GetBlockHeaderError, GetConfirmedTxError, GetTxError,
                   GetTxHeightError};
-use crate::{big_decimal_from_sat_unsigned, NumConversError, RpcTransportEventHandler, RpcTransportEventHandlerShared};
+use crate::{big_decimal_from_sat_unsigned, NumConversError, SharableRpcTransportEventHandler};
 
 cfg_native! {
     use futures::future::Either;
@@ -50,18 +53,18 @@ type ScriptHashUnspents = Vec<ElectrumUnspent>;
 
 #[derive(Debug)]
 pub struct ElectrumClientSettings {
-    client_name: String,
-    servers: Vec<ElectrumConnectionSettings>,
-    coin_ticker: String,
-    negotiate_version: bool,
-    connection_manager_policy: ConnectionManagerPolicy,
+    pub client_name: String,
+    pub servers: Vec<ElectrumConnectionSettings>,
+    pub coin_ticker: String,
+    pub negotiate_version: bool,
+    pub connection_manager_policy: ConnectionManagerPolicy,
 }
 
 #[derive(Debug)]
 pub struct ElectrumClientImpl {
     client_name: String,
     coin_ticker: String,
-    connection_manager: Box<dyn ConnectionManagerTrait + Send + Sync>,
+    pub connection_manager: Box<dyn ConnectionManagerTrait>,
     next_id: AtomicU64,
     negotiate_version: bool,
     protocol_version: OrdRange<f32>,
@@ -74,7 +77,7 @@ pub struct ElectrumClientImpl {
     /// Event handlers that are triggered on (dis)connection & transport events. They are wrapped
     /// in an `Arc` since they are shared outside `ElectrumClientImpl`. They are handed to each active
     /// `ElectrumConnection` to notify them about the events.
-    event_handlers: Arc<Vec<Box<dyn RpcTransportEventHandler + Send + Sync>>>,
+    event_handlers: Arc<Vec<Box<SharableRpcTransportEventHandler>>>,
     abortable_system: AbortableQueue,
 }
 
@@ -84,13 +87,13 @@ impl ElectrumClientImpl {
         client_settings: ElectrumClientSettings,
         block_headers_storage: BlockHeaderStorage,
         abortable_system: AbortableQueue,
-        mut event_handlers: Vec<Box<dyn RpcTransportEventHandler + Send + Sync>>,
+        mut event_handlers: Vec<Box<SharableRpcTransportEventHandler>>,
     ) -> Result<ElectrumClientImpl, String> {
-        let sub_abortable_system = abortable_system
-            .create_subsystem()
-            .map_err(|err| ERRL!("Failed to create connection_manager abortable system: {}", err))?;
+        // let sub_abortable_system = abortable_system
+        //     .create_subsystem()
+        //     .map_err(|err| ERRL!("Failed to create connection_manager abortable system: {}", err))?;
 
-        let connection_manager: Box<dyn ConnectionManagerTrait + Send + Sync> =
+        let connection_manager: Box<dyn ConnectionManagerTrait> =
             // match client_settings.connection_manager_policy {
             //     ConnectionManagerPolicy::Selective => Box::new(ConnectionManagerSelective::try_new_arc(
             //         client_settings.servers,
@@ -106,7 +109,7 @@ impl ElectrumClientImpl {
             };
 
         event_handlers.push(Box::new(ElectrumConnectionManagerNotifier {
-            connection_manager: connection_manager.clone(),
+            connection_manager: connection_manager.copy(),
         }));
 
         Ok(ElectrumClientImpl {
@@ -151,36 +154,16 @@ impl ElectrumClientImpl {
     /// Check if all connections have been removed.
     pub async fn is_connections_pool_empty(&self) -> bool { self.connection_manager.is_connections_pool_empty().await }
 
-    /// Set the protocol version for the specified server.
-    pub async fn set_protocol_version(&self, server_addr: &str, version: f32) -> Result<(), String> {
-        debug!(
-            "Set protocol version for electrum server: {}, version: {}",
-            server_addr, version
-        );
-        let conn = self
-            .connection_manager
-            .get_connection_by_address(server_addr)
-            .await
-            .map_err(|err| err.to_string())?;
-        conn.lock().await.set_protocol_version(version).await;
-
-        if let Some(sender) = &self.scripthash_notification_sender {
-            sender
-                .unbounded_send(ScripthashNotification::RefreshSubscriptions)
-                .map_err(|e| ERRL!("Failed sending scripthash message. {}", e))?;
-        }
-
-        Ok(())
-    }
-
     /// Get available protocol versions.
     pub fn protocol_version(&self) -> &OrdRange<f32> { &self.protocol_version }
+
+    pub fn coin_ticker(&self) -> &str { &self.coin_ticker }
 
     /// Whether to negotiate the protocol version.
     pub fn negotiate_version(&self) -> bool { self.negotiate_version }
 
     /// Get the event handlers.
-    pub fn event_handlers(&self) -> Arc<Vec<Box<dyn RpcTransportEventHandler + Send + Sync>>> { self.event_handlers.clone() }
+    pub fn event_handlers(&self) -> Arc<Vec<Box<SharableRpcTransportEventHandler>>> { self.event_handlers.clone() }
 
     /// Get block headers storage.
     pub fn block_headers_storage(&self) -> &BlockHeaderStorage { &self.block_headers_storage }
@@ -192,7 +175,7 @@ impl ElectrumClientImpl {
         client_settings: ElectrumClientSettings,
         block_headers_storage: BlockHeaderStorage,
         abortable_system: AbortableQueue,
-        event_handlers: Vec<Box<dyn RpcTransportEventHandler + Send + Sync>>,
+        event_handlers: Vec<Box<SharableRpcTransportEventHandler>>,
         protocol_version: OrdRange<f32>,
     ) -> ElectrumClientImpl {
         ElectrumClientImpl {
@@ -223,7 +206,7 @@ impl JsonRpcClient for ElectrumClient {
     fn client_info(&self) -> String { UtxoJsonRpcClientInfo::client_info(self) }
 
     fn transport(&self, request: JsonRpcRequestEnum) -> JsonRpcResponseFut {
-        Box::new(self.electrum_request_multi(request).boxed().compat())
+        Box::new(self.clone().electrum_request_multi(request).boxed().compat())
     }
 }
 
@@ -232,7 +215,8 @@ impl JsonRpcBatchClient for ElectrumClient {}
 impl JsonRpcMultiClient for ElectrumClient {
     fn transport_exact(&self, to_addr: String, request: JsonRpcRequestEnum) -> JsonRpcResponseFut {
         Box::new(
-            self.electrum_request_to(request, to_addr)
+            self.clone()
+                .electrum_request_to(to_addr.clone(), request)
                 // FIXME: Remove the async move if possible.
                 .and_then(|response| async move { Ok((JsonRpcRemoteAddr(to_addr), response)) })
                 .boxed()
@@ -245,10 +229,10 @@ impl JsonRpcMultiClient for ElectrumClient {
 impl ElectrumClient {
     pub async fn try_new(
         client_settings: ElectrumClientSettings,
-        mut event_handlers: Vec<Box<dyn RpcTransportEventHandler + Send + Sync>>,
+        mut event_handlers: Vec<Box<SharableRpcTransportEventHandler>>,
         block_headers_storage: BlockHeaderStorage,
         abortable_system: AbortableQueue,
-        scripthash_notification_sender: Option<UnboundSender<ScripthashNotification>>,
+        scripthash_notification_sender: Option<UnboundedSender<ScripthashNotification>>,
         spawn_ping: bool,
     ) -> Result<ElectrumClient, String> {
         // This is used for balance event streaming implementation for UTXOs.
@@ -277,7 +261,7 @@ impl ElectrumClient {
     /// which are *all* the servers if non of them is erroring (timeout, version mismatch, etc).
     /// A client with `ConnectionManagerPolicy::Selective` will send the request to the currently selected active server.
     async fn electrum_request_multi(
-        &self,
+        self,
         request: JsonRpcRequestEnum,
     ) -> Result<(JsonRpcRemoteAddr, JsonRpcResponseEnum), JsonRpcErrorType> {
         let mut errors = vec![];
@@ -289,8 +273,8 @@ impl ElectrumClient {
                 .electrum_request(json, request.rpc_id(), ELECTRUM_TIMEOUT_SEC)
                 .await
             {
-                Ok(response) => return Ok((JsonRpcRemoteAddr(connection.address().clone()), response)),
-                Err(e) => errors.push((connection.address().clone(), e)),
+                Ok(response) => return Ok((JsonRpcRemoteAddr(connection.address().to_string()), response)),
+                Err(e) => errors.push((connection.address().to_string(), e)),
             }
         }
 
@@ -299,7 +283,7 @@ impl ElectrumClient {
         }
 
         return Err(JsonRpcErrorType::Transport(format!(
-            "Failed to perform request {request:?}, errors: {e:?}"
+            "Failed to perform request {request:?}, errors: {errors:?}"
         )));
     }
 
@@ -308,13 +292,13 @@ impl ElectrumClient {
     /// In `ConnectionManagerPolicy::Selective` mode, the server might not be active, in which case
     /// the connection manager will try to establish a connection to it.
     async fn electrum_request_to(
-        &self,
+        self,
         to_addr: String,
         request: JsonRpcRequestEnum,
     ) -> Result<JsonRpcResponseEnum, JsonRpcErrorType> {
         let connection = self
             .connection_manager
-            .get_connection_by_address(to_addr.as_ref())
+            .get_connection_by_address(&to_addr)
             .await
             .map_err(|err| JsonRpcErrorType::Internal(err.to_string()))?;
 
@@ -336,7 +320,7 @@ impl ElectrumClient {
             self,
             server_address,
             "server.version",
-            self.client_name,
+            &self.client_name,
             protocol_version
         )
     }
@@ -496,7 +480,7 @@ impl ElectrumClient {
             .ok_or_else(|| {
                 GetTxHeightError::HeightNotFound(format!(
                     "Transaction block header is not found in storage for {}",
-                    self.client_impl.coin_ticker
+                    self.coin_ticker()
                 ))
             })?
             .try_into()?)
@@ -637,10 +621,10 @@ impl ElectrumClient {
             let futures = connections
                 .iter()
                 .map(|connection| {
-                    let addr = connection.addr.clone();
+                    let address = connection.address().to_string();
                     selfi
-                        .get_block_count_from(&addr)
-                        .map(|response| (addr, response))
+                        .get_block_count_from(&address)
+                        .map(|response| (address, response))
                         .compat()
                 })
                 .collect::<Vec<_>>();

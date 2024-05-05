@@ -11,6 +11,8 @@ mod tcp_stream;
 pub use client::{ElectrumClient, ElectrumClientImpl, ElectrumClientSettings};
 pub use connection::{ElectrumConnection, ElectrumConnectionSettings};
 pub use constants::*;
+pub use rpc_responses::*;
+pub use tcp_stream::*;
 
 #[inline]
 pub fn electrum_script_hash(script: &[u8]) -> Vec<u8> {

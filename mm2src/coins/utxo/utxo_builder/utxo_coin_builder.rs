@@ -9,7 +9,7 @@ use crate::utxo::{output_script, utxo_common, ElectrumBuilderArgs, RecentlySpent
                   ScripthashNotificationSender, TxFee, UtxoCoinConf, UtxoCoinFields, UtxoHDAccount, UtxoHDWallet,
                   UtxoRpcMode, UtxoSyncStatus, UtxoSyncStatusLoopHandle, DEFAULT_GAP_LIMIT, UTXO_DUST_AMOUNT};
 use crate::{BlockchainNetwork, CoinTransportMetrics, DerivationMethod, HistorySyncState, IguanaPrivKey,
-            PrivKeyBuildPolicy, PrivKeyPolicy, PrivKeyPolicyNotAllowed, RpcClientType, RpcTransportEventHandler,
+            PrivKeyBuildPolicy, PrivKeyPolicy, PrivKeyPolicyNotAllowed, RpcClientType, SharableRpcTransportEventHandler,
             UtxoActivationParams};
 
 use async_trait::async_trait;
@@ -544,7 +544,7 @@ pub trait UtxoCoinBuilderCommonOps {
     ) -> UtxoCoinBuildResult<ElectrumClient> {
         let coin_ticker = self.ticker().to_owned();
         let ctx = self.ctx();
-        let mut event_handlers: Vec<Box<dyn RpcTransportEventHandler>> = vec![];
+        let mut event_handlers: Vec<Box<SharableRpcTransportEventHandler>> = vec![];
         if args.collect_metrics {
             event_handlers.push(Box::new(CoinTransportMetrics::new(
                 ctx.metrics.weak(),

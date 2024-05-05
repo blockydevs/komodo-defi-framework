@@ -3775,6 +3775,7 @@ pub enum CoinProtocol {
 }
 
 pub type RpcTransportEventHandlerShared = Arc<dyn RpcTransportEventHandler + Send + Sync + 'static>;
+pub type SharableRpcTransportEventHandler = dyn RpcTransportEventHandler + Send + Sync;
 
 /// Common methods to handle the connection events.
 ///
@@ -3792,12 +3793,25 @@ pub trait RpcTransportEventHandler {
     fn on_disconnected(&self, address: &str) -> Result<(), String> { Ok(()) }
 }
 
+// FIXME: Remove send and sync here, shoudn't need those.
 impl fmt::Debug for dyn RpcTransportEventHandler + Send + Sync {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "{}", self.debug_info()) }
 }
 
 impl RpcTransportEventHandler for RpcTransportEventHandlerShared {
     fn debug_info(&self) -> String { self.deref().debug_info() }
+
+    fn on_outgoing_request(&self, data: &[u8]) { self.as_ref().on_outgoing_request(data) }
+
+    fn on_incoming_response(&self, data: &[u8]) { self.as_ref().on_incoming_response(data) }
+
+    fn on_connected(&self, address: &str) -> Result<(), String> { self.as_ref().on_connected(address) }
+
+    fn on_disconnected(&self, address: &str) -> Result<(), String> { self.as_ref().on_disconnected(address) }
+}
+
+impl RpcTransportEventHandler for Box<SharableRpcTransportEventHandler> {
+    fn debug_info(&self) -> String { self.as_ref().debug_info() }
 
     fn on_outgoing_request(&self, data: &[u8]) { self.as_ref().on_outgoing_request(data) }
 
@@ -3895,7 +3909,6 @@ impl RpcTransportEventHandler for CoinTransportMetrics {
         mm_counter!(self.metrics, "rpc_client.response.count", 1,
             "coin" => self.ticker.to_owned(), "client" => self.client.to_owned());
     }
-
 }
 
 #[async_trait]

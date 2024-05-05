@@ -6,12 +6,11 @@ use futures::lock::Mutex as AsyncMutex;
 use std::fmt::Debug;
 use std::sync::{Arc, Weak};
 
-use super::{ElectrumConnectionSettings, ElectrumConnection, ElectrumClientImpl};
+use super::{ElectrumClientImpl, ElectrumConnection, ElectrumConnectionSettings};
 
 /// This timeout implies both connecting and verifying phases time
 pub const DEFAULT_CONN_TIMEOUT_SEC: u64 = 20;
 pub const SUSPEND_TIMEOUT_INIT_SEC: u64 = 30;
-
 
 #[derive(Debug)]
 pub(crate) struct ElectrumConnCtx {
@@ -23,15 +22,19 @@ pub(crate) struct ElectrumConnCtx {
 
 /// Trait provides a common interface to get an `ElectrumConnection` from the `ElectrumClient` instance
 #[async_trait]
-pub trait ConnectionManagerTrait: Debug {
+pub trait ConnectionManagerTrait: Debug + Send + Sync {
+    /// A copy of the connection manager.
+    /// This is a workaround for the non-clonability of the objects/structs implementing this trait.
+    fn copy(&self) -> Box<dyn ConnectionManagerTrait>;
+
     /// Asynchronously retrieves all connections.
-    async fn get_connection(&self) -> Vec<Arc<AsyncMutex<ElectrumConnection>>>;
+    async fn get_connection(&self) -> Vec<Arc<ElectrumConnection>>;
 
     ///  Retrieve an electrum connection by its address.
     async fn get_connection_by_address(
         &self,
         address: &str,
-    ) -> Result<Arc<AsyncMutex<ElectrumConnection>>, ConnectionManagerErr>;
+    ) -> Result<Arc<ElectrumConnection>, ConnectionManagerErr>;
 
     /// Asynchronously establishes connections to an/a electrum server(s).
     async fn connect(&self, weak_client: Weak<ElectrumClientImpl>) -> Result<(), ConnectionManagerErr>;
@@ -50,8 +53,11 @@ pub trait ConnectionManagerTrait: Debug {
     // or not (false).
     async fn is_connections_pool_empty(&self) -> bool;
 
+    // Handles the connection event.
+    fn on_connected(&self, address: &str);
+
     // Handles the disconnection event from an Electrum server.
-    async fn on_disconnected(&self, address: &str);
+    fn on_disconnected(&self, address: &str);
 
     /// Add a subscription for the given script hash to the connection manager's list of active subscriptions .   
     async fn add_subscription(&self, script_hash: &str);

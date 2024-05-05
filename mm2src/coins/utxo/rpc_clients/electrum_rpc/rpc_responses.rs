@@ -137,7 +137,7 @@ impl ElectrumBlockHeader {
         }
     }
 
-    fn block_hash(&self) -> H256Json {
+    pub fn block_hash(&self) -> H256Json {
         match self {
             ElectrumBlockHeader::V12(h) => h.hash(),
             ElectrumBlockHeader::V14(h) => h.hash(),

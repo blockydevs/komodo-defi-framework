@@ -5,34 +5,35 @@ use crate::{big_decimal_from_sat_unsigned, NumConversError, RpcTransportEventHan
 use common::jsonrpc_client::{JsonRpcBatchClient, JsonRpcBatchResponse, JsonRpcClient, JsonRpcError, JsonRpcErrorType,
                              JsonRpcId, JsonRpcMultiClient, JsonRpcRemoteAddr, JsonRpcRequest, JsonRpcRequestEnum,
                              JsonRpcResponse, JsonRpcResponseEnum, JsonRpcResponseFut, RpcRes};
+use common::log::{debug, error, info, warn};
 use futures::channel::mpsc::{Receiver as AsyncReceiver, Sender as AsyncSender, UnboundedReceiver, UnboundedSender};
 use serde_json::{self as json, Value as Json};
 
 /// An `RpcTransportEventHandler` that forwards `ScripthashNotification`s to trigger balance updates.
 ///
 /// This handler hooks in `on_incoming_response` and looks for an electrum script hash notification to forward it.
-struct ElectrumScriptHashNotificationBridge {
-    scripthash_notification_sender: UnboundedSender<ScripthashNotification>,
+pub struct ElectrumScriptHashNotificationBridge {
+    pub scripthash_notification_sender: UnboundedSender<ScripthashNotification>,
 }
 
 impl RpcTransportEventHandler for ElectrumScriptHashNotificationBridge {
     fn debug_info(&self) -> String { "ElectrumScriptHashNotificationBridge".into() }
 
     fn on_incoming_response(&self, data: &[u8]) {
-        if let Some(raw_json) = json::from_slice::<Json>(data) {
+        if let Ok(raw_json) = json::from_slice::<Json>(data) {
             // Try to parse the notification. A notification is sent as a JSON-RPC request.
-            if let Some(notification) = json::from_value::<JsonRpcRequest>(raw_json) {
+            if let Ok(notification) = json::from_value::<JsonRpcRequest>(raw_json) {
                 // Only care about `BLOCKCHAIN_SCRIPTHASH_SUB_ID` notifications.
-                if notification.method.as_ref() == BLOCKCHAIN_SCRIPTHASH_SUB_ID {
+                if notification.method.as_str() == BLOCKCHAIN_SCRIPTHASH_SUB_ID {
                     if let Some(scripthash) = notification.params.first().map(|s| s.as_str()).flatten() {
                         if let Err(e) = self
                             .scripthash_notification_sender
-                            .send(ScripthashNotification::Trigger(scripthash.to_string()))
+                            .unbounded_send(ScripthashNotification::Triggered(scripthash.to_string()))
                         {
-                            error!("Failed sending script hash message. {e}");
+                            error!("Failed sending script hash message. {e:?}");
                         }
                     } else {
-                        warn!("Notification must contain the script hash value, got: {notification}");
+                        warn!("Notification must contain the script hash value, got: {notification:?}");
                     }
                 };
             }
@@ -44,8 +45,8 @@ impl RpcTransportEventHandler for ElectrumScriptHashNotificationBridge {
 ///
 /// When a connection is connected or disconnected, this event handler will notify the `ConnectionManager`
 /// to handle the the event.
-struct ElectrumConnectionManagerNotifier {
-    connection_manager: Box<dyn ConnectionManagerTrait + Send + Sync>,
+pub struct ElectrumConnectionManagerNotifier {
+    pub connection_manager: Box<dyn ConnectionManagerTrait>,
 }
 
 impl RpcTransportEventHandler for ElectrumConnectionManagerNotifier {

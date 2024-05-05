@@ -762,7 +762,7 @@ impl JsonRpcClient for NativeClientImpl {
             move |result| -> Result<(JsonRpcRemoteAddr, JsonRpcResponseEnum), JsonRpcErrorType> {
                 let res = result.map_err(|e| e.into_inner())?;
                 // measure now only body length, because the `hyper` crate doesn't allow to get total HTTP packet length
-                event_handlers.on_incoming_response(res.2.len());
+                event_handlers.on_incoming_response(&res.2);
 
                 let body =
                     std::str::from_utf8(&res.2).map_err(|e| JsonRpcErrorType::parse_error(&uri, e.to_string()))?;

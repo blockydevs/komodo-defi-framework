@@ -153,7 +153,7 @@ async fn send_request(request: Call, transport: HttpTransport) -> Result<Json, E
         },
     };
 
-    transport.event_handlers.on_incoming_response(body.len());
+    transport.event_handlers.on_incoming_response(&body);
 
     if !status.is_success() {
         return Err(request_failed_error(
@@ -236,7 +236,7 @@ async fn send_request_once(
     }
 
     // account for incoming traffic
-    event_handlers.on_incoming_response(response_str.len());
+    event_handlers.on_incoming_response(response_str.as_bytes());
 
     let response: Response = serde_json::from_str(&response_str).map_err(|e| {
         Error::InvalidResponse(format!(

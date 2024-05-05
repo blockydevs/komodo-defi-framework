@@ -1,5 +1,5 @@
 /// Wait time before pinging again.
-pub const PING_TIMEOUT_SEC: f64 = 30;
+pub const PING_TIMEOUT_SEC: u64 = 30;
 /// The timeout for the electrum server to establish a connection (& verify server version).
 pub const ELECTRUM_TIMEOUT_SEC: u64 = 60;
 pub const BLOCKCHAIN_HEADERS_SUB_ID: &str = "blockchain.headers.subscribe";

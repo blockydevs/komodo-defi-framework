@@ -689,7 +689,7 @@ fn spawn_block_header_utxo_loop(
     };
     info!("Starting UTXO block header loop for coin {ticker}");
 
-    let electrum_weak = Arc::downgrade(&client.client_impl);
+    let electrum_weak = Arc::downgrade(&client.0);
     let fut = block_header_utxo_loop(electrum_weak, sync_status_loop_handle, spv_conf);
 
     let settings = AbortSettings::info_on_abort(format!("spawn_block_header_utxo_loop stopped for {ticker}"));

@@ -369,7 +369,7 @@ async fn send_request(
     .map_err(|e| Error::Transport(TransportError::Message(e.to_string())))?;
 
     if let Ok(response) = notification_receiver.await {
-        event_handlers.on_incoming_response(response.len());
+        event_handlers.on_incoming_response(&response);
         return de_rpc_response(response, &transport.node.uri.to_string());
     };
 
