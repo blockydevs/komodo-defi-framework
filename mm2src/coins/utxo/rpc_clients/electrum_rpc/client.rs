@@ -83,7 +83,7 @@ pub struct ElectrumClientImpl {
 
 #[cfg_attr(test, mockable)]
 impl ElectrumClientImpl {
-    pub(super) fn try_new(
+    pub fn try_new(
         client_settings: ElectrumClientSettings,
         block_headers_storage: BlockHeaderStorage,
         abortable_system: AbortableQueue,
@@ -171,7 +171,7 @@ impl ElectrumClientImpl {
     pub fn weak_spawner(&self) -> WeakSpawner { self.abortable_system.weak_spawner() }
 
     #[cfg(test)]
-    pub(super) fn with_protocol_version(
+    pub fn with_protocol_version(
         client_settings: ElectrumClientSettings,
         block_headers_storage: BlockHeaderStorage,
         abortable_system: AbortableQueue,

@@ -481,13 +481,14 @@ fn test_wait_for_payment_spend_timeout_electrum() {
         negotiate_version: true,
         connection_manager_policy: ConnectionManagerPolicy::default(),
     };
-    let client = ElectrumClient::try_new(
+    let client = block_on(ElectrumClient::try_new(
         client_settings,
         Default::default(),
         block_headers_storage,
         abortable_system,
         None,
-    )
+        false,
+    ))
     .expect("Expected electrum_client_impl constructed without a problem");
     let client = UtxoRpcClientEnum::Electrum(client);
     let coin = utxo_coin_for_test(client, None, false);
@@ -1570,10 +1571,7 @@ fn test_one_unavailable_electrum_proto_version() {
     // check if the electrum-mona.bitbank.cc:50001 doesn't support the protocol version 1.4
     let client = electrum_client_for_test(&["electrum-mona.bitbank.cc:50001"]);
     let result = client
-        .server_version(
-            "electrum-mona.bitbank.cc:50001",
-            &OrdRange::new(1.4, 1.4).unwrap(),
-        )
+        .server_version("electrum-mona.bitbank.cc:50001", &OrdRange::new(1.4, 1.4).unwrap())
         .wait();
     assert!(result
         .err()
@@ -4411,7 +4409,7 @@ fn test_block_header_utxo_loop() {
         "max_stored_block_headers": 15
     }));
 
-    let weak_client = Arc::downgrade(&client.client_impl);
+    let weak_client = Arc::downgrade(&client.0);
     let loop_fut = async move { block_header_utxo_loop(weak_client, loop_handle, spv_conf.unwrap()).await };
 
     let test_fut = async move {
@@ -4632,7 +4630,7 @@ fn test_block_header_utxo_loop_with_reorg() {
         "max_stored_block_headers": 100
     }));
 
-    let weak_client = Arc::downgrade(&client.client_impl);
+    let weak_client = Arc::downgrade(&client.0);
     let loop_fut = async move { block_header_utxo_loop(weak_client, loop_handle, spv_conf.unwrap()).await };
 
     let test_fut = async move {

@@ -27,7 +27,7 @@ use crate::{big_decimal_from_sat_unsigned, NumConversError, RpcTransportEventHan
 
 macro_rules! log_and_return {
     ($typ:tt, $err:expr, $addr:expr, $conn:expr) => {{
-        let err = ElectrumConnectionErr::$typ($err.to_string());
+        let err = ElectrumConnectionErr::$typ(format!("{:?}", $err));
         $conn.set_last_error(err.clone()).await;
         error!("{} {:?}", $addr, err);
         return Err(err);
@@ -303,8 +303,8 @@ impl ElectrumConnection {
             }
         }
 
-        let event_handlers = client.event_handlers();
         let address = connection.address().to_string();
+        let event_handlers = client.event_handlers();
 
         let socket_addr = match address.to_socket_addrs() {
             Ok(mut addr) => match addr.next() {
@@ -518,10 +518,217 @@ impl ElectrumConnection {
     }
 
     #[cfg(target_arch = "wasm32")]
-    async fn establish_connection_loop<Spawner: SpawnFuture>(
+    async fn establish_connection_loop(
         connection: Arc<ElectrumConnection>,
         client: ElectrumClient,
-    ) -> Result<f32, ConnectionManagerErr> {
-        Ok(0.0)
+    ) -> Result<f32, ElectrumConnectionErr> {
+        use mm2_net::wasm::wasm_ws::ws_transport;
+        use std::sync::atomic::AtomicUsize;
+        lazy_static! {
+            static ref CONN_IDX: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
+        }
+
+        // Check why we errored the last time, don't try to reconnect if it was an irrecoverable error.
+        if let Some(last_error) = connection.last_error().await {
+            if let ElectrumConnectionErr::Irrecoverable(_) = last_error {
+                return Err(last_error);
+            }
+        }
+
+        let mut address = connection.address().to_string();
+        let event_handlers = client.event_handlers();
+
+        let uri: Uri = match address.parse() {
+            Ok(uri) => uri,
+            Err(e) => {
+                log_and_return!(
+                    Irrecoverable,
+                    format!("Failed to parse the address: {e:?}"),
+                    address,
+                    connection
+                );
+            },
+        };
+        if uri.scheme().is_some() {
+            log_and_return!(
+                Irrecoverable,
+                "There has not to be a scheme in the url. 'ws://' scheme is used by default.  Consider using 'protocol: \"WSS\"' in the electrum request to switch to the 'wss://' scheme.",
+                address,
+                connection
+            );
+        }
+
+        let mut secure_connection = false;
+        match connection.settings.protocol {
+            ElectrumProtocol::WS => {
+                address.insert_str(0, "ws://");
+            },
+            ElectrumProtocol::WSS => {
+                address.insert_str(0, "wss://");
+                secure_connection = true;
+            },
+            ElectrumProtocol::TCP | ElectrumProtocol::SSL => {
+                log_and_return!(
+                    Irrecoverable,
+                    "'TCP' and 'SSL' are not supported in a browser. Please use 'WS' or 'WSS' protocols",
+                    address,
+                    connection
+                );
+            },
+        };
+
+        let mut timeout = connection.settings.timeout_sec.unwrap_or(ELECTRUM_TIMEOUT_SEC);
+        let conn_idx = CONN_IDX.fetch_add(1, AtomicOrdering::Relaxed);
+        // FIXME: Add a timeout for connection establishment, and use the remainder of the timeout to query for the server version.
+        let (mut transport_tx, mut transport_rx) = log_and_return_if_err!(
+            ws_transport(conn_idx, &address, &connection.weak_spawner()).await,
+            Temporary,
+            address,
+            connection
+        );
+
+        match secure_connection {
+            true => info!("Electrum client connected to {address} securely"),
+            false => info!("Electrum client connected to {address}"),
+        };
+
+        let last_response = Arc::new(AtomicU64::new(now_ms()));
+        let no_connection_timeout_f = {
+            let last_response = last_response.clone();
+            async move {
+                loop {
+                    Timer::sleep(ELECTRUM_TIMEOUT_SEC as f64).await;
+                    let last_sec = (last_response.load(AtomicOrdering::Relaxed) / 1000) as f64;
+                    if now_float() - last_sec > ELECTRUM_TIMEOUT_SEC as f64 {
+                        break ElectrumConnectionErr::Temporary(format!(
+                            "Server didn't respond for too long ({}s).",
+                            now_float() - last_sec
+                        ));
+                    }
+                }
+            }
+        };
+        let mut no_connection_timeout_f = Box::pin(no_connection_timeout_f).fuse();
+
+        let recv_f = {
+            let address = address.clone();
+            let connection = connection.clone();
+            let event_handlers = event_handlers.clone();
+            async move {
+                // FIXME: `process_electrum_response` would be better off receiving bytes and not raw json,
+                // this is to avoid converting the json back to bytes to pass to the event handlers. Check if
+                // this is possible.
+                while let Some(response) = transport_rx.next().await {
+                    match response {
+                        Ok(raw_json) => {
+                            last_response.store(now_ms(), AtomicOrdering::Relaxed);
+                            connection.process_electrum_response(raw_json, &event_handlers).await;
+                        },
+                        Err(e) => {
+                            error!("{address} error: {e:?}");
+                        },
+                    }
+                }
+                ElectrumConnectionErr::Temporary("Receiver disconnected".to_string())
+            }
+        };
+        let mut recv_f = Box::pin(recv_f).fuse();
+
+        let (tx, rx) = mpsc::channel(0);
+        let send_f = {
+            let address = address.clone();
+            let event_handlers = event_handlers.clone();
+            let mut rx = rx_to_stream(rx).compat();
+            async move {
+                while let Some(Ok(bytes)) = rx.next().await {
+                    // FIXME: Also here we don't need to convert the bytes to json.
+                    // That's too early considering it will be send over the network.
+                    // Fix `transport_tx.send` so that it accepts bytes instead.
+                    let raw_json: Json = match json::from_slice(&bytes) {
+                        Ok(raw_json) => raw_json,
+                        Err(e) => {
+                            error!("{address} error: {e:?} deserializing the outgoing data: {bytes:?}");
+                            continue;
+                        },
+                    };
+                    event_handlers.on_outgoing_request(&bytes);
+
+                    if let Err(e) = transport_tx.send(raw_json).await {
+                        error!("{address} error: {e:?} sending data {bytes:?}");
+                    }
+                }
+                ElectrumConnectionErr::Temporary("Sender disconnected".to_string())
+            }
+        };
+        let mut send_f = Box::pin(send_f).fuse();
+
+        // Start the connection loop on a weak spawner.
+        let connection_loop = {
+            let address = address.clone();
+            let connection = connection.clone();
+            let event_handlers = event_handlers.clone();
+            async move {
+                if !connection.try_connect(tx).await {
+                    // Gracefully return if some other thread is already connected using `connection`.
+                    // Up until this point, we didn't alter `connection` in any way.
+                    // Note that the other active connection is the one which will reply to the version querying
+                    // and we will still exit `establish_connection_loop` without any errors.
+                    return;
+                }
+                event_handlers.on_connected(&address);
+                info!("{address} is now connected");
+
+                let err = select! {
+                    e = no_connection_timeout_f => e,
+                    e = recv_f => e,
+                    e = send_f => e,
+                };
+
+                error!("{address} connection dropped due to: {err:?}");
+                event_handlers.on_disconnected(&address);
+                // DISCUSS: This will call abort all spawned tasks. INCLUDING THIS ONE WE ARE RUNNING OFF OF.
+                connection.disconnect(Some(err)).await;
+            }
+        };
+        connection.weak_spawner().spawn(connection_loop);
+
+        // FIXME: Use the remainder of the connection timeout here.
+        let version = match client
+            .server_version(&address, client.protocol_version())
+            .compat()
+            .await
+        {
+            Err(e) => disconnect_and_return_error!(
+                ElectrumConnectionErr::Temporary(format!("Error querying electrum server version {e:?}")),
+                address,
+                connection,
+                event_handlers
+            ),
+            Ok(version_str) => match version_str.protocol_version.parse::<f32>() {
+                Err(e) => disconnect_and_return_error!(
+                    ElectrumConnectionErr::Temporary(format!("Failed to parse electrum server version {e:?}")),
+                    address,
+                    connection,
+                    event_handlers
+                ),
+                Ok(version_f32) => {
+                    if client.negotiate_version() {
+                        let client_version_range = client.protocol_version();
+                        if !client_version_range.contains(&version_f32) {
+                            disconnect_and_return_error!(
+                                ElectrumConnectionErr::VersionMismatch(client_version_range.clone(), version_f32),
+                                address,
+                                connection,
+                                event_handlers
+                            )
+                        }
+                    }
+                    version_f32
+                },
+            },
+        };
+
+        connection.set_protocol_version(version).await;
+        Ok(version)
     }
 }

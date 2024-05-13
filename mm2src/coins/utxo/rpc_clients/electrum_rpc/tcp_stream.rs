@@ -68,7 +68,6 @@ impl AsyncWrite for ElectrumStream {
 /// Skips the server certificate verification on TLS connection
 pub struct NoCertificateVerification {}
 
-#[cfg(not(target_arch = "wasm32"))]
 impl rustls::client::ServerCertVerifier for NoCertificateVerification {
     fn verify_server_cert(
         &self,
