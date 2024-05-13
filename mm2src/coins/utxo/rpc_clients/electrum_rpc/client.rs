@@ -18,7 +18,7 @@ use serde_json::{self as json, Value as Json};
 use std::sync::{Arc, Weak};
 
 use super::super::*;
-
+use super::event_handlers::{ElectrumConnectionManagerNotifier, ElectrumScriptHashNotificationBridge};
 use super::rpc_responses::*;
 use super::*;
 
@@ -26,8 +26,6 @@ use crate::utxo::rpc_clients::ConcurrentRequestMap;
 use crate::utxo::utxo_block_header_storage::BlockHeaderStorage;
 use crate::utxo::{output_script, GetBlockHeaderError, GetConfirmedTxError, GetTxHeightError};
 use crate::SharableRpcTransportEventHandler;
-
-cfg_native! {}
 
 type ElectrumTxHistory = Vec<ElectrumTxHistoryItem>;
 type ElectrumScriptHash = String;
@@ -60,61 +58,63 @@ pub struct ElectrumClientImpl {
     /// in an `Arc` since they are shared outside `ElectrumClientImpl`. They are handed to each active
     /// `ElectrumConnection` to notify them about the events.
     event_handlers: Arc<Vec<Box<SharableRpcTransportEventHandler>>>,
+    pub scripthash_notification_sender: Option<UnboundedSender<ScripthashNotification>>,
     abortable_system: AbortableQueue,
 }
 
 #[cfg_attr(test, mockable)]
 impl ElectrumClientImpl {
     pub fn try_new(
-        _client_settings: ElectrumClientSettings,
-        _block_headers_storage: BlockHeaderStorage,
-        _abortable_system: AbortableQueue,
-        _event_handlers: Vec<Box<SharableRpcTransportEventHandler>>,
+        client_settings: ElectrumClientSettings,
+        block_headers_storage: BlockHeaderStorage,
+        abortable_system: AbortableQueue,
+        mut event_handlers: Vec<Box<SharableRpcTransportEventHandler>>,
+        scripthash_notification_sender: Option<UnboundedSender<ScripthashNotification>>,
     ) -> Result<ElectrumClientImpl, String> {
-        panic!("cargo fix")
+        // This is used for balance event streaming implementation for UTXOs.
+        // Will be used for sending scripthash messages to trigger re-connections, re-fetching the balances, etc.
+        if let Some(scripthash_notification_sender) = scripthash_notification_sender.clone() {
+            event_handlers.push(Box::new(ElectrumScriptHashNotificationBridge {
+                scripthash_notification_sender,
+            }));
+        }
+
+        // let sub_abortable_system = abortable_system
+        //     .create_subsystem()
+        //     .map_err(|err| ERRL!("Failed to create connection_manager abortable system: {}", err))?;
+
+        let connection_manager: Box<dyn ConnectionManagerTrait> =
+            // match client_settings.connection_manager_policy {
+            //     ConnectionManagerPolicy::Selective => Box::new(ConnectionManagerSelective::try_new_arc(
+            //         client_settings.servers,
+            //         sub_abortable_system,
+            //     )?),
+            //     ConnectionManagerPolicy::Multiple => Box::new(ConnectionManagerMultiple::try_new_arc(
+            //         client_settings.servers,
+            //         sub_abortable_system,
+            //     )?),
+            // };
+            panic!("panic for now");
+
+        event_handlers.push(Box::new(ElectrumConnectionManagerNotifier {
+            connection_manager: connection_manager.copy(),
+        }));
+
+        Ok(ElectrumClientImpl {
+            client_name: client_settings.client_name,
+            coin_ticker: client_settings.coin_ticker,
+            connection_manager,
+            next_id: 0.into(),
+            negotiate_version: client_settings.negotiate_version,
+            protocol_version: OrdRange::new(1.2, 1.4).unwrap(),
+            get_balance_concurrent_map: ConcurrentRequestMap::new(),
+            list_unspent_concurrent_map: ConcurrentRequestMap::new(),
+            block_headers_storage,
+            abortable_system,
+            scripthash_notification_sender,
+            event_handlers: Arc::new(event_handlers),
+        })
     }
-
-    // pub fn try_new(
-    //     client_settings: ElectrumClientSettings,
-    //     block_headers_storage: BlockHeaderStorage,
-    //     abortable_system: AbortableQueue,
-    //     mut event_handlers: Vec<Box<SharableRpcTransportEventHandler>>,
-    // ) -> Result<ElectrumClientImpl, String> {
-    //     // let sub_abortable_system = abortable_system
-    //     //     .create_subsystem()
-    //     //     .map_err(|err| ERRL!("Failed to create connection_manager abortable system: {}", err))?;
-
-    //     let connection_manager: Box<dyn ConnectionManagerTrait> =
-    //         // match client_settings.connection_manager_policy {
-    //         //     ConnectionManagerPolicy::Selective => Box::new(ConnectionManagerSelective::try_new_arc(
-    //         //         client_settings.servers,
-    //         //         sub_abortable_system,
-    //         //     )?),
-    //         //     ConnectionManagerPolicy::Multiple => Box::new(ConnectionManagerMultiple::try_new_arc(
-    //         //         client_settings.servers,
-    //         //         sub_abortable_system,
-    //         //     )?),
-    //         // };
-    //         panic!("panic for now");
-
-    //     event_handlers.push(Box::new(ElectrumConnectionManagerNotifier {
-    //         connection_manager: connection_manager.copy(),
-    //     }));
-
-    //     Ok(ElectrumClientImpl {
-    //         client_name: client_settings.client_name,
-    //         coin_ticker: client_settings.coin_ticker,
-    //         connection_manager,
-    //         next_id: 0.into(),
-    //         negotiate_version: client_settings.negotiate_version,
-    //         protocol_version: OrdRange::new(1.2, 1.4).unwrap(),
-    //         get_balance_concurrent_map: ConcurrentRequestMap::new(),
-    //         list_unspent_concurrent_map: ConcurrentRequestMap::new(),
-    //         block_headers_storage,
-    //         abortable_system,
-    //         event_handlers: Arc::new(event_handlers),
-    //     })
-    // }
 
     // FIXME: Make sure a connection was established here at connect
     pub async fn connect(&self, weak_shared_self: Weak<ElectrumClientImpl>) -> Result<(), String> {
@@ -165,12 +165,19 @@ impl ElectrumClientImpl {
         block_headers_storage: BlockHeaderStorage,
         abortable_system: AbortableQueue,
         event_handlers: Vec<Box<SharableRpcTransportEventHandler>>,
+        scripthash_notification_sender: Option<UnboundedSender<ScripthashNotification>>,
         protocol_version: OrdRange<f32>,
     ) -> ElectrumClientImpl {
         ElectrumClientImpl {
             protocol_version,
-            ..ElectrumClientImpl::try_new(client_settings, block_headers_storage, abortable_system, event_handlers)
-                .expect("Expected electrum_client_impl constructed without a problem")
+            ..ElectrumClientImpl::try_new(
+                client_settings,
+                block_headers_storage,
+                abortable_system,
+                event_handlers,
+                scripthash_notification_sender,
+            )
+            .expect("Expected electrum_client_impl constructed without a problem")
         }
     }
 }
@@ -221,22 +228,15 @@ impl ElectrumClient {
         event_handlers: Vec<Box<SharableRpcTransportEventHandler>>,
         block_headers_storage: BlockHeaderStorage,
         abortable_system: AbortableQueue,
-        _scripthash_notification_sender: Option<UnboundedSender<ScripthashNotification>>,
+        scripthash_notification_sender: Option<UnboundedSender<ScripthashNotification>>,
         _spawn_ping: bool,
     ) -> Result<ElectrumClient, String> {
-        // This is used for balance event streaming implementation for UTXOs.
-        // Will be used for sending scripthash messages to trigger re-connections, re-fetching the balances, etc.
-        // if let Some(scripthash_notification_sender) = scripthash_notification_sender {
-        //     event_handlers.push(Box::new(ElectrumScriptHashNotificationBridge {
-        //         scripthash_notification_sender,
-        //     }));
-        // }
-
         let client = ElectrumClient(Arc::new(ElectrumClientImpl::try_new(
             client_settings,
             block_headers_storage,
             abortable_system,
             event_handlers,
+            scripthash_notification_sender,
         )?));
 
         client.connect(Arc::downgrade(&client.0)).await?;

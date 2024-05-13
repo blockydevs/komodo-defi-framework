@@ -5383,17 +5383,17 @@ pub fn address_to_scripthash(address: &Address) -> Result<String, keys::Error> {
 
 pub async fn utxo_prepare_addresses_for_balance_stream_if_enabled<T>(
     coin: &T,
-    _addresses: HashSet<Address>,
+    addresses: HashSet<Address>,
 ) -> MmResult<(), String>
 where
     T: UtxoCommonOps,
 {
-    if let UtxoRpcClientEnum::Electrum(_electrum_client) = &coin.as_ref().rpc_client {
-        // if let Some(sender) = &electrum_client.scripthash_notification_sender {
-        //     sender
-        //         .unbounded_send(ScripthashNotification::SubscribeToAddresses(addresses))
-        //         .map_err(|e| ERRL!("Failed sending scripthash message. {}", e))?;
-        // }
+    if let UtxoRpcClientEnum::Electrum(electrum_client) = &coin.as_ref().rpc_client {
+        if let Some(sender) = &electrum_client.scripthash_notification_sender {
+            sender
+                .unbounded_send(ScripthashNotification::SubscribeToAddresses(addresses))
+                .map_err(|e| ERRL!("Failed sending scripthash message. {}", e))?;
+        }
     };
 
     Ok(())
