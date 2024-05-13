@@ -9,12 +9,12 @@ use crate::utxo::{output_script, utxo_common, ElectrumBuilderArgs, RecentlySpent
                   ScripthashNotificationSender, TxFee, UtxoCoinConf, UtxoCoinFields, UtxoHDAccount, UtxoHDWallet,
                   UtxoRpcMode, UtxoSyncStatus, UtxoSyncStatusLoopHandle, DEFAULT_GAP_LIMIT, UTXO_DUST_AMOUNT};
 use crate::{BlockchainNetwork, CoinTransportMetrics, DerivationMethod, HistorySyncState, IguanaPrivKey,
-            PrivKeyBuildPolicy, PrivKeyPolicy, PrivKeyPolicyNotAllowed, RpcClientType, SharableRpcTransportEventHandler,
-            UtxoActivationParams};
+            PrivKeyBuildPolicy, PrivKeyPolicy, PrivKeyPolicyNotAllowed, RpcClientType,
+            SharableRpcTransportEventHandler, UtxoActivationParams};
 
 use async_trait::async_trait;
 use chain::TxHashAlgo;
-use common::executor::{abortable_queue::AbortableQueue, AbortableSystem, AbortedError, Timer};
+use common::executor::{abortable_queue::AbortableQueue, AbortableSystem, AbortedError};
 use common::now_sec;
 use crypto::{Bip32DerPathError, CryptoCtx, CryptoCtxError, GlobalHDAccountArc, HwWalletType, StandardHDPathError,
              StandardHDPathToCoin};

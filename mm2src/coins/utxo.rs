@@ -50,7 +50,7 @@ use common::executor::abortable_queue::AbortableQueue;
 #[cfg(not(target_arch = "wasm32"))]
 use common::first_char_to_upper;
 use common::jsonrpc_client::JsonRpcError;
-use common::log::{debug, LogOnError};
+use common::log::LogOnError;
 use common::{now_sec, now_sec_u32};
 use crypto::{Bip32DerPathOps, Bip32Error, Bip44Chain, ChildNumber, DerivationPath, Secp256k1ExtendedPublicKey,
              StandardHDCoinAddress, StandardHDPathError, StandardHDPathToAccount, StandardHDPathToCoin};
@@ -105,8 +105,8 @@ use self::rpc_clients::{electrum_script_hash, ElectrumClient, ElectrumConnection
 use super::{big_decimal_from_sat_unsigned, BalanceError, BalanceFut, BalanceResult, CoinBalance, CoinFutSpawner,
             CoinsContext, DerivationMethod, FeeApproxStage, FoundSwapTxSpend, HistorySyncState, KmdRewardsDetails,
             MarketCoinOps, MmCoin, NumConversError, NumConversResult, PrivKeyActivationPolicy, PrivKeyPolicy,
-            PrivKeyPolicyNotAllowed, RawTransactionFut, RpcTransportEventHandler, TradeFee, TradePreimageError,
-            TradePreimageFut, TradePreimageResult, Transaction, TransactionDetails, TransactionEnum, TransactionErr,
+            PrivKeyPolicyNotAllowed, RawTransactionFut, TradeFee, TradePreimageError, TradePreimageFut,
+            TradePreimageResult, Transaction, TransactionDetails, TransactionEnum, TransactionErr,
             UnexpectedDerivationMethod, VerificationError, WithdrawError, WithdrawRequest};
 use crate::coin_balance::{EnableCoinScanPolicy, EnabledCoinBalanceParams, HDAddressBalanceScanner};
 use crate::hd_wallet::{HDAccountOps, HDAccountsMutex, HDAddress, HDAddressId, HDWalletCoinOps, HDWalletOps,

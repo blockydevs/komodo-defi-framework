@@ -2,28 +2,27 @@ pub type JsonRpcPendingRequests = HashMap<JsonRpcId, async_oneshot::Sender<JsonR
 use serde::Serialize;
 use serde_json::{self as json, Value as Json};
 
-use common::log::{debug, error, info, warn};
+use common::log::{error, info};
 
 cfg_native! {
     use futures::future::Either;
-    use futures::io::Error;
-    use http::header::AUTHORIZATION;
-    use http::{Request, StatusCode};
-    use rustls::client::ServerCertVerified;
-    use rustls::{Certificate, ClientConfig, ServerName, OwnedTrustAnchor, RootCertStore};
+
+
+
+
+    use rustls::{ServerName};
     use std::convert::TryFrom;
-    use std::pin::Pin;
-    use std::task::{Context, Poll};
-    use std::time::SystemTime;
-    use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf};
+
+
+
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::TcpStream;
-    use tokio_rustls::{client::TlsStream, TlsConnector};
+    use tokio_rustls::{TlsConnector};
     use tokio_rustls::webpki::DnsNameRef;
-    use webpki_roots::TLS_SERVER_ROOTS;
+
 }
 use super::super::*;
-use crate::{big_decimal_from_sat_unsigned, NumConversError, RpcTransportEventHandler, RpcTransportEventHandlerShared,
-            SharableRpcTransportEventHandler};
+use crate::{RpcTransportEventHandler, SharableRpcTransportEventHandler};
 
 macro_rules! log_and_return {
     ($typ:tt, $err:expr, $addr:expr, $conn:expr) => {{
@@ -194,7 +193,7 @@ impl ElectrumConnection {
             .timeout(Duration::from_secs(timeout))
             .await
             .map_err(|e| JsonRpcErrorType::Transport(e.to_string()))?
-            .map_err(|e| JsonRpcErrorType::Transport("The sender didn't send".to_string()))
+            .map_err(|_e| JsonRpcErrorType::Transport("The sender didn't send".to_string()))
     }
 
     /// Process an incoming JSONRPC response from the electrum server.
@@ -368,7 +367,7 @@ impl ElectrumConnection {
             },
         };
 
-        let mut timeout = connection.settings.timeout_sec.unwrap_or(ELECTRUM_TIMEOUT_SEC);
+        let _timeout = connection.settings.timeout_sec.unwrap_or(ELECTRUM_TIMEOUT_SEC);
         // FIXME: Add a timeout for connection establishment.
         // Use what's left of the timeout to query for the server version.
         let stream = log_and_return_if_err!(connect_f.await, Temporary, address, connection);

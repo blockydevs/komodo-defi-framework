@@ -84,10 +84,7 @@ impl EventBehaviour for UtxoStandardCoin {
                         }
 
                         // If subscription is successful, add to the list.
-                        client
-                            .connection_manager
-                            .add_subscription(&scripthash)
-                            .await;
+                        client.connection_manager.add_subscription(&scripthash).await;
                     }
 
                     Ok(scripthash_to_address_map)

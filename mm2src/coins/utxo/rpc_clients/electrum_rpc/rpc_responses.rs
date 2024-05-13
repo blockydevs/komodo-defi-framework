@@ -1,10 +1,8 @@
 use super::super::UnspentInfo;
-use chain::{BlockHeader, BlockHeaderBits, BlockHeaderNonce, OutPoint, Transaction as UtxoTx, TransactionInput,
-            TxHashAlgo};
-use mm2_number::{BigDecimal, BigInt, MmNumber};
-use rpc::v1::types::{Bytes as BytesJson, Transaction as RpcTransaction, H256 as H256Json};
-use serialization::{deserialize, serialize, serialize_with_flags, CoinVariant, CompactInteger, Reader,
-                    SERIALIZE_TRANSACTION_WITNESS};
+use chain::{BlockHeader, BlockHeaderBits, BlockHeaderNonce, OutPoint, Transaction as UtxoTx};
+use mm2_number::{BigDecimal, BigInt};
+use rpc::v1::types::{Bytes as BytesJson, H256 as H256Json};
+use serialization::serialize;
 
 #[derive(Debug, Deserialize)]
 pub struct ElectrumTxHistoryItem {

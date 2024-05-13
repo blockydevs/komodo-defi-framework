@@ -6,81 +6,76 @@ pub use electrum_rpc::*;
 
 use crate::utxo::ScripthashNotification;
 use async_trait::async_trait;
-use chain::{BlockHeader, BlockHeaderBits, BlockHeaderNonce, OutPoint, Transaction as UtxoTx, TransactionInput,
-            TxHashAlgo};
+use chain::{BlockHeader, OutPoint, Transaction as UtxoTx, TransactionInput, TxHashAlgo};
 use derive_more::Display;
 use futures::channel::oneshot as async_oneshot;
 use futures::compat::{Future01CompatExt, Stream01CompatExt};
 use futures::future::{join_all, FutureExt, TryFutureExt};
 use futures::lock::Mutex as AsyncMutex;
 use futures::{select, StreamExt};
-use futures01::future::select_ok;
+
 use futures01::sync::mpsc;
 use futures01::{Future, Sink, Stream};
-use http::uri::InvalidUri;
+
 use http::Uri;
 use itertools::Itertools;
 use keys::hash::H256;
 use keys::Address;
 #[cfg(test)] use mocktopus::macros::*;
-use rand::seq::SliceRandom;
+
 use rpc::v1::types::{Bytes as BytesJson, Transaction as RpcTransaction, H256 as H256Json};
 use serde_json::{self as json, Value as Json};
 use serialization::{deserialize, serialize, serialize_with_flags, CoinVariant, CompactInteger, Reader,
                     SERIALIZE_TRANSACTION_WITNESS};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use spv_validation::helpers_validation::SPVError;
 use spv_validation::storage::BlockHeaderStorageOps;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::fmt;
-use std::fmt::{Debug, Formatter};
+use std::fmt::Debug;
 use std::io;
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::ToSocketAddrs;
 use std::num::NonZeroU64;
 use std::ops::Deref;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::custom_futures::{select_ok_sequential, timeout::FutureTimerExt};
-use common::custom_iter::{CollectInto, TryIntoGroupMap};
+use common::custom_futures::timeout::FutureTimerExt;
+use common::custom_iter::TryIntoGroupMap;
 use common::executor::{abortable_queue::AbortableQueue, abortable_queue::WeakSpawner, AbortableSystem, SpawnFuture,
                        Timer};
 use common::jsonrpc_client::{JsonRpcBatchClient, JsonRpcBatchResponse, JsonRpcClient, JsonRpcError, JsonRpcErrorType,
-                             JsonRpcId, JsonRpcMultiClient, JsonRpcRemoteAddr, JsonRpcRequest, JsonRpcRequestEnum,
-                             JsonRpcResponse, JsonRpcResponseEnum, JsonRpcResponseFut, RpcRes};
-use common::log::{debug, error, info, warn};
-use common::{median, now_float, now_ms, now_sec, small_rng, OrdRange};
-use mm2_core::ConnectionManagerPolicy;
+                             JsonRpcId, JsonRpcRemoteAddr, JsonRpcRequest, JsonRpcRequestEnum, JsonRpcResponse,
+                             JsonRpcResponseEnum, JsonRpcResponseFut, RpcRes};
+use common::log::{error, info, warn};
+use common::{median, now_float, now_ms, now_sec, OrdRange};
+
 use mm2_err_handle::prelude::*;
-use mm2_number::{BigDecimal, BigInt, MmNumber};
+use mm2_number::{BigDecimal, MmNumber};
 use mm2_rpc::data::legacy::{ElectrumProtocol, Priority};
 
-use crate::utxo::utxo_block_header_storage::BlockHeaderStorage;
-use crate::utxo::{output_script, sat_from_big_decimal, GetBlockHeaderError, GetConfirmedTxError, GetTxError,
-                  GetTxHeightError};
+use crate::utxo::{sat_from_big_decimal, GetBlockHeaderError, GetTxError};
 use crate::{big_decimal_from_sat_unsigned, NumConversError, RpcTransportEventHandler, RpcTransportEventHandlerShared};
 
-use super::ScripthashNotificationSender;
-
 cfg_native! {
-    use futures::future::Either;
-    use futures::io::Error;
+
+
     use http::header::AUTHORIZATION;
     use http::{Request, StatusCode};
-    use rustls::client::ServerCertVerified;
-    use rustls::{Certificate, ClientConfig, ServerName, OwnedTrustAnchor, RootCertStore};
-    use std::convert::TryFrom;
-    use std::pin::Pin;
-    use std::task::{Context, Poll};
-    use std::time::SystemTime;
-    use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf};
-    use tokio::net::TcpStream;
-    use tokio_rustls::{client::TlsStream, TlsConnector};
-    use tokio_rustls::webpki::DnsNameRef;
-    use webpki_roots::TLS_SERVER_ROOTS;
+
+
+
+
+
+
+
+
+
+
+
 }
 
 pub const NO_TX_ERROR_CODE: &str = "'code': -5";
@@ -89,7 +84,6 @@ const TX_NOT_FOUND_RETRIES: u8 = 10;
 
 pub type AddressesByLabelResult = HashMap<String, AddressPurpose>;
 pub type UnspentMap = HashMap<Address, Vec<UnspentInfo>>;
-
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
@@ -234,8 +228,6 @@ pub struct UnspentInfo {
     /// Note None if the transaction is not mined yet.
     pub height: Option<u64>,
 }
-
-
 
 #[derive(Debug, PartialEq)]
 pub enum BlockHashOrHeight {

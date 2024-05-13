@@ -119,7 +119,9 @@ async fn send_request(request: Call, transport: HttpTransport) -> Result<Json, E
         };
     }
 
-    transport.event_handlers.on_outgoing_request(serialized_request.as_bytes());
+    transport
+        .event_handlers
+        .on_outgoing_request(serialized_request.as_bytes());
 
     let mut req = http::Request::new(serialized_request.into_bytes());
     *req.method_mut() = http::Method::POST;

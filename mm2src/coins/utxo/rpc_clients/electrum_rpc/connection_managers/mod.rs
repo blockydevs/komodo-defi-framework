@@ -31,10 +31,7 @@ pub trait ConnectionManagerTrait: Debug + Send + Sync {
     async fn get_connection(&self) -> Vec<Arc<ElectrumConnection>>;
 
     ///  Retrieve an electrum connection by its address.
-    async fn get_connection_by_address(
-        &self,
-        address: &str,
-    ) -> Result<Arc<ElectrumConnection>, ConnectionManagerErr>;
+    async fn get_connection_by_address(&self, address: &str) -> Result<Arc<ElectrumConnection>, ConnectionManagerErr>;
 
     /// Asynchronously establishes connections to an/a electrum server(s).
     async fn connect(&self, weak_client: Weak<ElectrumClientImpl>) -> Result<(), ConnectionManagerErr>;

@@ -3784,13 +3784,13 @@ pub type SharableRpcTransportEventHandler = dyn RpcTransportEventHandler + Send 
 pub trait RpcTransportEventHandler {
     fn debug_info(&self) -> String;
 
-    fn on_outgoing_request(&self, data: &[u8]) {}
+    fn on_outgoing_request(&self, _data: &[u8]) {}
 
-    fn on_incoming_response(&self, data: &[u8]) {}
+    fn on_incoming_response(&self, _data: &[u8]) {}
 
-    fn on_connected(&self, address: &str) -> Result<(), String> { Ok(()) }
+    fn on_connected(&self, _address: &str) -> Result<(), String> { Ok(()) }
 
-    fn on_disconnected(&self, address: &str) -> Result<(), String> { Ok(()) }
+    fn on_disconnected(&self, _address: &str) -> Result<(), String> { Ok(()) }
 }
 
 // FIXME: Remove send and sync here, shoudn't need those.

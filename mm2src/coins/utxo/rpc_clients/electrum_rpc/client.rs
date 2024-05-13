@@ -1,51 +1,33 @@
-use super::super::{UnspentInfo, UtxoJsonRpcClientInfo, UtxoRpcClientOps, UtxoRpcError, UtxoRpcFut, UtxoRpcResult};
-use common::custom_futures::{select_ok_sequential, timeout::FutureTimerExt};
-use common::custom_iter::{CollectInto, TryIntoGroupMap};
-use common::executor::{abortable_queue::AbortableQueue, abortable_queue::WeakSpawner, AbortableSystem, SpawnFuture,
-                       Timer};
-use common::jsonrpc_client::{JsonRpcBatchClient, JsonRpcBatchResponse, JsonRpcClient, JsonRpcError, JsonRpcErrorType,
-                             JsonRpcId, JsonRpcMultiClient, JsonRpcRemoteAddr, JsonRpcRequest, JsonRpcRequestEnum,
-                             JsonRpcResponse, JsonRpcResponseEnum, JsonRpcResponseFut, RpcRes};
-use common::log::{debug, error, info, warn};
-use common::{median, now_float, now_ms, now_sec, small_rng, OrdRange};
+use super::super::{UnspentInfo, UtxoJsonRpcClientInfo, UtxoRpcClientOps, UtxoRpcError, UtxoRpcFut};
+
+use common::custom_iter::CollectInto;
+use common::executor::{abortable_queue::AbortableQueue, abortable_queue::WeakSpawner};
+use common::jsonrpc_client::{JsonRpcBatchClient, JsonRpcClient, JsonRpcError, JsonRpcErrorType, JsonRpcMultiClient,
+                             JsonRpcRemoteAddr, JsonRpcRequest, JsonRpcRequestEnum, JsonRpcResponseEnum,
+                             JsonRpcResponseFut, RpcRes};
+
+use common::{median, OrdRange};
 use connection_managers::ConnectionManagerTrait;
-use futures::channel::mpsc::{Receiver as AsyncReceiver, Sender as AsyncSender, UnboundedReceiver, UnboundedSender};
+use futures::channel::mpsc::UnboundedSender;
 use mm2_core::ConnectionManagerPolicy;
 use mm2_err_handle::prelude::*;
-use mm2_number::{BigDecimal, BigInt, MmNumber};
-use mm2_rpc::data::legacy::{ElectrumProtocol, Priority};
+use mm2_number::BigDecimal;
+
 use serde_json::{self as json, Value as Json};
 
 use std::sync::{Arc, Weak};
 
 use super::super::*;
-use super::event_handlers::*;
+
 use super::rpc_responses::*;
 use super::*;
 
 use crate::utxo::rpc_clients::ConcurrentRequestMap;
 use crate::utxo::utxo_block_header_storage::BlockHeaderStorage;
-use crate::utxo::{output_script, sat_from_big_decimal, GetBlockHeaderError, GetConfirmedTxError, GetTxError,
-                  GetTxHeightError};
-use crate::{big_decimal_from_sat_unsigned, NumConversError, SharableRpcTransportEventHandler};
+use crate::utxo::{output_script, GetBlockHeaderError, GetConfirmedTxError, GetTxHeightError};
+use crate::SharableRpcTransportEventHandler;
 
-cfg_native! {
-    use futures::future::Either;
-    use futures::io::Error;
-    use http::header::AUTHORIZATION;
-    use http::{Request, StatusCode};
-    use rustls::client::ServerCertVerified;
-    use rustls::{Certificate, ClientConfig, ServerName, OwnedTrustAnchor, RootCertStore};
-    use std::convert::TryFrom;
-    use std::pin::Pin;
-    use std::task::{Context, Poll};
-    use std::time::SystemTime;
-    use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf};
-    use tokio::net::TcpStream;
-    use tokio_rustls::{client::TlsStream, TlsConnector};
-    use tokio_rustls::webpki::DnsNameRef;
-    use webpki_roots::TLS_SERVER_ROOTS;
-}
+cfg_native! {}
 
 type ElectrumTxHistory = Vec<ElectrumTxHistoryItem>;
 type ElectrumScriptHash = String;
@@ -84,48 +66,55 @@ pub struct ElectrumClientImpl {
 #[cfg_attr(test, mockable)]
 impl ElectrumClientImpl {
     pub fn try_new(
-        client_settings: ElectrumClientSettings,
-        block_headers_storage: BlockHeaderStorage,
-        abortable_system: AbortableQueue,
-        mut event_handlers: Vec<Box<SharableRpcTransportEventHandler>>,
+        _client_settings: ElectrumClientSettings,
+        _block_headers_storage: BlockHeaderStorage,
+        _abortable_system: AbortableQueue,
+        _event_handlers: Vec<Box<SharableRpcTransportEventHandler>>,
     ) -> Result<ElectrumClientImpl, String> {
-        // let sub_abortable_system = abortable_system
-        //     .create_subsystem()
-        //     .map_err(|err| ERRL!("Failed to create connection_manager abortable system: {}", err))?;
-
-        let connection_manager: Box<dyn ConnectionManagerTrait> =
-            // match client_settings.connection_manager_policy {
-            //     ConnectionManagerPolicy::Selective => Box::new(ConnectionManagerSelective::try_new_arc(
-            //         client_settings.servers,
-            //         sub_abortable_system,
-            //     )?),
-            //     ConnectionManagerPolicy::Multiple => Box::new(ConnectionManagerMultiple::try_new_arc(
-            //         client_settings.servers,
-            //         sub_abortable_system,
-            //     )?),
-            // };
-            match client_settings.connection_manager_policy {
-                _ => panic!("panic for now")
-            };
-
-        event_handlers.push(Box::new(ElectrumConnectionManagerNotifier {
-            connection_manager: connection_manager.copy(),
-        }));
-
-        Ok(ElectrumClientImpl {
-            client_name: client_settings.client_name,
-            coin_ticker: client_settings.coin_ticker,
-            connection_manager,
-            next_id: 0.into(),
-            negotiate_version: client_settings.negotiate_version,
-            protocol_version: OrdRange::new(1.2, 1.4).unwrap(),
-            get_balance_concurrent_map: ConcurrentRequestMap::new(),
-            list_unspent_concurrent_map: ConcurrentRequestMap::new(),
-            block_headers_storage,
-            abortable_system,
-            event_handlers: Arc::new(event_handlers),
-        })
+        panic!("cargo fix")
     }
+
+    // pub fn try_new(
+    //     client_settings: ElectrumClientSettings,
+    //     block_headers_storage: BlockHeaderStorage,
+    //     abortable_system: AbortableQueue,
+    //     mut event_handlers: Vec<Box<SharableRpcTransportEventHandler>>,
+    // ) -> Result<ElectrumClientImpl, String> {
+    //     // let sub_abortable_system = abortable_system
+    //     //     .create_subsystem()
+    //     //     .map_err(|err| ERRL!("Failed to create connection_manager abortable system: {}", err))?;
+
+    //     let connection_manager: Box<dyn ConnectionManagerTrait> =
+    //         // match client_settings.connection_manager_policy {
+    //         //     ConnectionManagerPolicy::Selective => Box::new(ConnectionManagerSelective::try_new_arc(
+    //         //         client_settings.servers,
+    //         //         sub_abortable_system,
+    //         //     )?),
+    //         //     ConnectionManagerPolicy::Multiple => Box::new(ConnectionManagerMultiple::try_new_arc(
+    //         //         client_settings.servers,
+    //         //         sub_abortable_system,
+    //         //     )?),
+    //         // };
+    //         panic!("panic for now");
+
+    //     event_handlers.push(Box::new(ElectrumConnectionManagerNotifier {
+    //         connection_manager: connection_manager.copy(),
+    //     }));
+
+    //     Ok(ElectrumClientImpl {
+    //         client_name: client_settings.client_name,
+    //         coin_ticker: client_settings.coin_ticker,
+    //         connection_manager,
+    //         next_id: 0.into(),
+    //         negotiate_version: client_settings.negotiate_version,
+    //         protocol_version: OrdRange::new(1.2, 1.4).unwrap(),
+    //         get_balance_concurrent_map: ConcurrentRequestMap::new(),
+    //         list_unspent_concurrent_map: ConcurrentRequestMap::new(),
+    //         block_headers_storage,
+    //         abortable_system,
+    //         event_handlers: Arc::new(event_handlers),
+    //     })
+    // }
 
     // FIXME: Make sure a connection was established here at connect
     pub async fn connect(&self, weak_shared_self: Weak<ElectrumClientImpl>) -> Result<(), String> {
@@ -229,19 +218,19 @@ impl JsonRpcMultiClient for ElectrumClient {
 impl ElectrumClient {
     pub async fn try_new(
         client_settings: ElectrumClientSettings,
-        mut event_handlers: Vec<Box<SharableRpcTransportEventHandler>>,
+        event_handlers: Vec<Box<SharableRpcTransportEventHandler>>,
         block_headers_storage: BlockHeaderStorage,
         abortable_system: AbortableQueue,
-        scripthash_notification_sender: Option<UnboundedSender<ScripthashNotification>>,
-        spawn_ping: bool,
+        _scripthash_notification_sender: Option<UnboundedSender<ScripthashNotification>>,
+        _spawn_ping: bool,
     ) -> Result<ElectrumClient, String> {
         // This is used for balance event streaming implementation for UTXOs.
         // Will be used for sending scripthash messages to trigger re-connections, re-fetching the balances, etc.
-        if let Some(scripthash_notification_sender) = scripthash_notification_sender {
-            event_handlers.push(Box::new(ElectrumScriptHashNotificationBridge {
-                scripthash_notification_sender,
-            }));
-        }
+        // if let Some(scripthash_notification_sender) = scripthash_notification_sender {
+        //     event_handlers.push(Box::new(ElectrumScriptHashNotificationBridge {
+        //         scripthash_notification_sender,
+        //     }));
+        // }
 
         let client = ElectrumClient(Arc::new(ElectrumClientImpl::try_new(
             client_settings,
@@ -489,9 +478,10 @@ impl ElectrumClient {
     // get_tx_height_from_storage is always preferred to be used instead of this, but if there is no headers in storage (storing headers is not enabled)
     // this function can be used instead
     async fn get_tx_height_from_rpc(&self, tx: &UtxoTx) -> Result<u64, GetTxHeightError> {
+        let selfi = self;
         for output in tx.outputs.clone() {
             let script_pubkey_str = hex::encode(electrum_script_hash(&output.script_pubkey));
-            if let Ok(history) = self.scripthash_get_history(script_pubkey_str.as_str()).compat().await {
+            if let Ok(history) = selfi.scripthash_get_history(script_pubkey_str.as_str()).compat().await {
                 if let Some(item) = history
                     .into_iter()
                     .find(|item| item.tx_hash.reversed() == H256Json(*tx.hash()) && item.height > 0)
@@ -502,7 +492,7 @@ impl ElectrumClient {
         }
         Err(GetTxHeightError::HeightNotFound(format!(
             "Couldn't find height through electrum for {}",
-            self.coin_ticker
+            selfi.coin_ticker
         )))
     }
 

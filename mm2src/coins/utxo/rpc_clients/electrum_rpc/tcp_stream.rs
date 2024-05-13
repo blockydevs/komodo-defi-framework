@@ -1,20 +1,17 @@
-use futures::future::Either;
 use futures::io::Error;
-use http::header::AUTHORIZATION;
-use http::{Request, StatusCode};
+
 use rustls::client::ServerCertVerified;
 use rustls::{Certificate, ClientConfig, OwnedTrustAnchor, RootCertStore, ServerName};
-use serde_json::{self as json, Value as Json};
-use std::convert::TryFrom;
+
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::SystemTime;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
-use tokio_rustls::webpki::DnsNameRef;
-use tokio_rustls::{client::TlsStream, TlsConnector};
+
+use tokio_rustls::client::TlsStream;
 use webpki_roots::TLS_SERVER_ROOTS;
 
 /// The enum wrapping possible variants of underlying Streams

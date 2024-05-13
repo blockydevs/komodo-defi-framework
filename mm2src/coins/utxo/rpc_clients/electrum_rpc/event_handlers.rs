@@ -1,12 +1,10 @@
 use super::connection_managers::ConnectionManagerTrait;
 use super::constants::BLOCKCHAIN_SCRIPTHASH_SUB_ID;
 use crate::utxo::ScripthashNotification;
-use crate::{big_decimal_from_sat_unsigned, NumConversError, RpcTransportEventHandler, RpcTransportEventHandlerShared};
-use common::jsonrpc_client::{JsonRpcBatchClient, JsonRpcBatchResponse, JsonRpcClient, JsonRpcError, JsonRpcErrorType,
-                             JsonRpcId, JsonRpcMultiClient, JsonRpcRemoteAddr, JsonRpcRequest, JsonRpcRequestEnum,
-                             JsonRpcResponse, JsonRpcResponseEnum, JsonRpcResponseFut, RpcRes};
-use common::log::{debug, error, info, warn};
-use futures::channel::mpsc::{Receiver as AsyncReceiver, Sender as AsyncSender, UnboundedReceiver, UnboundedSender};
+use crate::RpcTransportEventHandler;
+use common::jsonrpc_client::JsonRpcRequest;
+use common::log::{error, warn};
+use futures::channel::mpsc::UnboundedSender;
 use serde_json::{self as json, Value as Json};
 
 /// An `RpcTransportEventHandler` that forwards `ScripthashNotification`s to trigger balance updates.
