@@ -26,19 +26,20 @@ use crate::{big_decimal_from_sat_unsigned, NumConversError, RpcTransportEventHan
             SharableRpcTransportEventHandler};
 
 macro_rules! log_and_return {
-    ($typ:tt, $err:expr, $addr:expr) => {{
+    ($typ:tt, $err:expr, $addr:expr, $conn:expr) => {{
         let err = ElectrumConnectionErr::$typ($err.to_string());
+        $conn.set_last_error(err.clone()).await;
         error!("{} {:?}", $addr, err);
         return Err(err);
     }};
 }
 
 macro_rules! log_and_return_if_err {
-    ($ex:expr, $typ:tt, $addr:expr) => {{
+    ($ex:expr, $typ:tt, $addr:expr, $conn:expr) => {{
         match $ex {
             Ok(res) => res,
             Err(e) => {
-                log_and_return!($typ, e, $addr);
+                log_and_return!($typ, e, $addr, $conn);
             },
         }
     }};
@@ -114,26 +115,44 @@ impl ElectrumConnection {
 
     fn weak_spawner(&self) -> WeakSpawner { self.abortable_system.weak_spawner() }
 
-    async fn set_protocol_version(&self, version: f32) { self.protocol_version.lock().await.replace(version); }
-
-    async fn get_protocol_version(&self) -> Option<f32> { *self.protocol_version.lock().await }
-
     async fn is_connected(&self) -> bool { self.tx.lock().await.is_some() }
 
-    async fn connect(&self, tx: mpsc::Sender<Vec<u8>>) {
-        // Make sure we are disconnected first.
-        self.disconnect(None).await;
-        // We don't know the server version, the caller should run a connection loop and query the server version to set it.
-        self.tx.lock().await.replace(tx);
-        self.last_error.lock().await.take();
+    async fn set_protocol_version(&self, version: f32) { self.protocol_version.lock().await.replace(version); }
+
+    async fn clear_protocol_version(&self) { self.protocol_version.lock().await.take(); }
+
+    async fn protocol_version(&self) -> Option<f32> { *self.protocol_version.lock().await }
+
+    async fn set_last_error(&self, reason: ElectrumConnectionErr) { self.last_error.lock().await.replace(reason); }
+
+    async fn clear_last_error(&self) { self.last_error.lock().await.take(); }
+
+    async fn last_error(&self) -> Option<ElectrumConnectionErr> { self.last_error.lock().await.clone() }
+
+    /// Try to connect to the electrum server.
+    ///
+    /// This method will try to connect to the electrum server. It is atomic, meaning that if it was called
+    /// multiple times by accident, only the first connection will hold (a `true` is then returned).
+    /// Other connections won't overwrite the first connection (and a `false` will then be return).
+    async fn try_connect(&self, tx: mpsc::Sender<Vec<u8>>) -> bool {
+        let mut tx_guard = self.tx.lock().await;
+        if tx_guard.is_some() {
+            // We are already connected to the server. Tell the caller that we won't accept connections until we disconnect.
+            return false;
+        }
+        tx_guard.replace(tx);
+        self.clear_last_error().await;
+        true
     }
 
     /// Disconnect and clear the connection state.
     async fn disconnect(&self, reason: Option<ElectrumConnectionErr>) {
         self.tx.lock().await.take();
         self.responses.lock().await.clear();
-        self.protocol_version.lock().await.take();
-        *self.last_error.lock().await = reason;
+        self.clear_protocol_version().await;
+        if let Some(reason) = reason {
+            self.set_last_error(reason).await;
+        }
         self.abortable_system.abort_all();
     }
 
@@ -271,11 +290,19 @@ impl ElectrumConnection {
     ///
     /// This will first try to connect to the server and use that connection to query its version.
     /// If version checks succeed, the connection will be kept alive, otherwise, it will be dropped.
+    /// Returns either the version of the server, or an [`ElectrumConnectionErr`].
     #[cfg(not(target_arch = "wasm32"))]
     async fn establish_connection_loop(
         connection: Arc<ElectrumConnection>,
         client: ElectrumClient,
-    ) -> Result<(), ElectrumConnectionErr> {
+    ) -> Result<f32, ElectrumConnectionErr> {
+        // Check why we errored the last time, don't try to reconnect if it was an irrecoverable error.
+        if let Some(last_error) = connection.last_error().await {
+            if let ElectrumConnectionErr::Irrecoverable(_) = last_error {
+                return Err(last_error);
+            }
+        }
+
         let event_handlers = client.event_handlers();
         let address = connection.address().to_string();
 
@@ -283,11 +310,16 @@ impl ElectrumConnection {
             Ok(mut addr) => match addr.next() {
                 Some(addr) => addr,
                 None => {
-                    log_and_return!(Irrecoverable, "Address resolved to None.", address);
+                    log_and_return!(Irrecoverable, "Address resolved to None.", address, connection);
                 },
             },
             Err(e) => {
-                log_and_return!(Irrecoverable, format!("Resolve error in address: {e:?}"), address);
+                log_and_return!(
+                    Irrecoverable,
+                    format!("Resolve error in address: {e:?}"),
+                    address,
+                    connection
+                );
             },
         };
 
@@ -298,17 +330,17 @@ impl ElectrumConnection {
                 let uri: Uri = match address.parse() {
                     Ok(uri) => uri,
                     Err(e) => {
-                        log_and_return!(Irrecoverable, format!("URL parse error: {e:?}"), address);
+                        log_and_return!(Irrecoverable, format!("URL parse error: {e:?}"), address, connection);
                     },
                 };
 
                 let Some(dns_name) = uri.host().map(String::from) else {
-                    log_and_return!(Irrecoverable, "Couldn't retrieve host from addr", address);
+                    log_and_return!(Irrecoverable, "Couldn't retrieve host from addr", address, connection);
                 };
 
                 // Make sure that the host is a valid DNS name.
                 if let Err(e) = DnsNameRef::try_from_ascii_str(dns_name.as_str()) {
-                    log_and_return!(Irrecoverable, format!("Invalid DNS name: {e:?}"), address)
+                    log_and_return!(Irrecoverable, format!("Invalid DNS name: {e:?}"), address, connection)
                 }
 
                 let tls_connector = if connection.settings.disable_cert_verification {
@@ -329,8 +361,9 @@ impl ElectrumConnection {
             ElectrumProtocol::WS | ElectrumProtocol::WSS => {
                 log_and_return!(
                     Irrecoverable,
-                    "WS and WSS protocols are not supported yet. Consider using TCP or SSL",
-                    address
+                    "Incorrect protocol for native connection ('WS'/'WSS'). Use 'TCP' or 'SSL' instead.",
+                    address,
+                    connection
                 );
             },
         };
@@ -338,21 +371,16 @@ impl ElectrumConnection {
         let mut timeout = connection.settings.timeout_sec.unwrap_or(ELECTRUM_TIMEOUT_SEC);
         // FIXME: Add a timeout for connection establishment.
         // Use what's left of the timeout to query for the server version.
-        let stream = log_and_return_if_err!(connect_f.await, Temporary, address);
-        log_and_return_if_err!(stream.as_ref().set_nodelay(true), Temporary, address);
+        let stream = log_and_return_if_err!(connect_f.await, Temporary, address, connection);
+        log_and_return_if_err!(stream.as_ref().set_nodelay(true), Temporary, address, connection);
 
         match secure_connection {
             true => info!("Electrum client connected to {address} securely"),
             false => info!("Electrum client connected to {address}"),
         };
 
-        // We are now connected to the electrum server.
-        let (tx, rx) = mpsc::channel(0);
-        connection.tx.lock().await.replace(tx);
-        event_handlers.on_connected(&address);
-
         let last_response = Arc::new(AtomicU64::new(now_ms()));
-        let no_connection_timeout = {
+        let no_connection_timeout_f = {
             let last_response = last_response.clone();
             async move {
                 loop {
@@ -367,7 +395,7 @@ impl ElectrumConnection {
                 }
             }
         };
-        let mut no_connection_timeout = Box::pin(no_connection_timeout).fuse();
+        let mut no_connection_timeout_f = Box::pin(no_connection_timeout_f).fuse();
 
         let (read, mut write) = tokio::io::split(stream);
         let recv_f = {
@@ -401,6 +429,7 @@ impl ElectrumConnection {
         };
         let mut recv_f = Box::pin(recv_f).fuse();
 
+        let (tx, rx) = mpsc::channel(0);
         let send_f = {
             let address = address.clone();
             let event_handlers = event_handlers.clone();
@@ -424,8 +453,18 @@ impl ElectrumConnection {
             let connection = connection.clone();
             let event_handlers = event_handlers.clone();
             async move {
+                if !connection.try_connect(tx).await {
+                    // Gracefully return if some other thread is already connected using `connection`.
+                    // Up until this point, we didn't alter `connection` in any way.
+                    // Note that the other active connection is the one which will reply to the version querying
+                    // and we will still exit `establish_connection_loop` without any errors.
+                    return;
+                }
+                event_handlers.on_connected(&address);
+                info!("{address} is now connected");
+
                 let err = select! {
-                    e = no_connection_timeout => e,
+                    e = no_connection_timeout_f => e,
                     e = recv_f => e,
                     e = send_f => e,
                 };
@@ -475,6 +514,14 @@ impl ElectrumConnection {
         };
 
         connection.set_protocol_version(version).await;
-        return Ok(());
+        Ok(version)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    async fn establish_connection_loop<Spawner: SpawnFuture>(
+        connection: Arc<ElectrumConnection>,
+        client: ElectrumClient,
+    ) -> Result<f32, ConnectionManagerErr> {
+        Ok(0.0)
     }
 }
