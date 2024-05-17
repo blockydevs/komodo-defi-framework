@@ -48,7 +48,7 @@ macro_rules! disconnect_and_return_error {
     ($err:expr, $addr:expr, $connection:expr, $event_handlers:expr) => {{
         error!("{} connection dropped due to: {:?}", $addr, $err);
         // Inform the event handlers of the disconnection.
-        $event_handlers.on_disconnected(&$addr);
+        $event_handlers.on_disconnected(&$addr).ok();
         // Disconnect the connection.
         $connection.disconnect(Some($err.clone())).await;
         return Err($err);
@@ -74,11 +74,24 @@ pub struct ElectrumConnectionSettings {
 }
 
 #[derive(Clone, Debug)]
-enum ElectrumConnectionErr {
+pub enum ElectrumConnectionErr {
     Timeout(f32),
     Temporary(String),
     Irrecoverable(String),
     VersionMismatch(OrdRange<f32>, f32),
+}
+
+impl ElectrumConnectionErr {
+    pub fn is_recoverable(&self) -> bool {
+        match self {
+            ElectrumConnectionErr::Irrecoverable(_) => false,
+            ElectrumConnectionErr::Timeout(_)
+            | ElectrumConnectionErr::Temporary(_)
+            // We won't consider version mismatch as irrecoverable since assuming that
+            // a server's version can change over time.
+            | ElectrumConnectionErr::VersionMismatch(_, _) => true,
+        }
+    }
 }
 
 /// Represents the active Electrum connection to selected address
@@ -99,14 +112,14 @@ pub struct ElectrumConnection {
 }
 
 impl ElectrumConnection {
-    async fn new(settings: ElectrumConnectionSettings) -> Self {
+    pub fn new(settings: ElectrumConnectionSettings, abortable_system: AbortableQueue) -> Self {
         ElectrumConnection {
             settings,
             tx: AsyncMutex::new(None),
             responses: AsyncMutex::new(JsonRpcPendingRequests::new()),
             protocol_version: AsyncMutex::new(None),
             last_error: AsyncMutex::new(None),
-            abortable_system: AbortableQueue::default(),
+            abortable_system,
         }
     }
 
@@ -114,19 +127,19 @@ impl ElectrumConnection {
 
     fn weak_spawner(&self) -> WeakSpawner { self.abortable_system.weak_spawner() }
 
-    async fn is_connected(&self) -> bool { self.tx.lock().await.is_some() }
+    pub async fn is_connected(&self) -> bool { self.tx.lock().await.is_some() }
 
     async fn set_protocol_version(&self, version: f32) { self.protocol_version.lock().await.replace(version); }
 
     async fn clear_protocol_version(&self) { self.protocol_version.lock().await.take(); }
 
-    async fn protocol_version(&self) -> Option<f32> { *self.protocol_version.lock().await }
+    pub async fn protocol_version(&self) -> Option<f32> { *self.protocol_version.lock().await }
 
     async fn set_last_error(&self, reason: ElectrumConnectionErr) { self.last_error.lock().await.replace(reason); }
 
     async fn clear_last_error(&self) { self.last_error.lock().await.take(); }
 
-    async fn last_error(&self) -> Option<ElectrumConnectionErr> { self.last_error.lock().await.clone() }
+    pub async fn last_error(&self) -> Option<ElectrumConnectionErr> { self.last_error.lock().await.clone() }
 
     /// Try to connect to the electrum server.
     ///
@@ -145,13 +158,15 @@ impl ElectrumConnection {
     }
 
     /// Disconnect and clear the connection state.
-    async fn disconnect(&self, reason: Option<ElectrumConnectionErr>) {
+    pub async fn disconnect(&self, reason: Option<ElectrumConnectionErr>) {
         self.tx.lock().await.take();
         self.responses.lock().await.clear();
         self.clear_protocol_version().await;
         if let Some(reason) = reason {
             self.set_last_error(reason).await;
         }
+        // FIXME: This is actually not right. The system is unusable after calling abort_all
+        // create a new method that aborts all the futures while keeping the system intact.
         self.abortable_system.abort_all();
     }
 
@@ -246,7 +261,7 @@ impl ElectrumConnection {
                     result: req.params[0].clone(),
                     error: Json::Null,
                 })
-                //return;
+                //return; // BLOCKCHAIN_HEADERS_SUB_ID wasn't handled, just returned.
                 //also, you might want to check the notification type to print an error message if it's not expected
             },
         };
@@ -291,7 +306,7 @@ impl ElectrumConnection {
     /// If version checks succeed, the connection will be kept alive, otherwise, it will be dropped.
     /// Returns either the version of the server, or an [`ElectrumConnectionErr`].
     #[cfg(not(target_arch = "wasm32"))]
-    async fn establish_connection_loop(
+    pub async fn establish_connection_loop(
         connection: Arc<ElectrumConnection>,
         client: ElectrumClient,
     ) -> Result<f32, ElectrumConnectionErr> {
@@ -459,7 +474,7 @@ impl ElectrumConnection {
                     // and we will still exit `establish_connection_loop` without any errors.
                     return;
                 }
-                event_handlers.on_connected(&address);
+                event_handlers.on_connected(&address).ok();
                 info!("{address} is now connected");
 
                 let err = select! {
@@ -469,7 +484,7 @@ impl ElectrumConnection {
                 };
 
                 error!("{address} connection dropped due to: {err:?}");
-                event_handlers.on_disconnected(&address);
+                event_handlers.on_disconnected(&address).ok();
                 // DISCUSS: This will call abort all spawned tasks. INCLUDING THIS ONE WE ARE RUNNING OFF OF.
                 connection.disconnect(Some(err)).await;
             }
@@ -490,6 +505,7 @@ impl ElectrumConnection {
             ),
             Ok(version_str) => match version_str.protocol_version.parse::<f32>() {
                 Err(e) => disconnect_and_return_error!(
+                    // FIXME: Relax the error type here?
                     ElectrumConnectionErr::Irrecoverable(format!("Failed to parse electrum server version {e:?}")),
                     address,
                     connection,
@@ -517,7 +533,7 @@ impl ElectrumConnection {
     }
 
     #[cfg(target_arch = "wasm32")]
-    async fn establish_connection_loop(
+    pub async fn establish_connection_loop(
         connection: Arc<ElectrumConnection>,
         client: ElectrumClient,
     ) -> Result<f32, ElectrumConnectionErr> {
@@ -674,7 +690,7 @@ impl ElectrumConnection {
                     // and we will still exit `establish_connection_loop` without any errors.
                     return;
                 }
-                event_handlers.on_connected(&address);
+                event_handlers.on_connected(&address).ok();
                 info!("{address} is now connected");
 
                 let err = select! {
@@ -684,7 +700,7 @@ impl ElectrumConnection {
                 };
 
                 error!("{address} connection dropped due to: {err:?}");
-                event_handlers.on_disconnected(&address);
+                event_handlers.on_disconnected(&address).ok();
                 // DISCUSS: This will call abort all spawned tasks. INCLUDING THIS ONE WE ARE RUNNING OFF OF.
                 connection.disconnect(Some(err)).await;
             }

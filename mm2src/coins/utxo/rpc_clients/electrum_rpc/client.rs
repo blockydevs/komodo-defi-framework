@@ -15,9 +15,11 @@ use mm2_number::BigDecimal;
 
 use serde_json::{self as json, Value as Json};
 
-use std::sync::{Arc, Weak};
+use std::collections::HashSet;
+use std::sync::Arc;
 
 use super::super::*;
+use super::connection_managers::ConnectionManagerMultiple;
 use super::event_handlers::{ElectrumConnectionManagerNotifier, ElectrumScriptHashNotificationBridge};
 use super::rpc_responses::*;
 use super::*;
@@ -64,13 +66,13 @@ pub struct ElectrumClientImpl {
 
 #[cfg_attr(test, mockable)]
 impl ElectrumClientImpl {
-    pub fn try_new(
+    pub fn try_new_arc(
         client_settings: ElectrumClientSettings,
         block_headers_storage: BlockHeaderStorage,
         abortable_system: AbortableQueue,
         mut event_handlers: Vec<Box<SharableRpcTransportEventHandler>>,
         scripthash_notification_sender: Option<UnboundedSender<ScripthashNotification>>,
-    ) -> Result<ElectrumClientImpl, String> {
+    ) -> Result<Arc<ElectrumClientImpl>, String> {
         // This is used for balance event streaming implementation for UTXOs.
         // Will be used for sending scripthash messages to trigger re-connections, re-fetching the balances, etc.
         if let Some(scripthash_notification_sender) = scripthash_notification_sender.clone() {
@@ -79,28 +81,29 @@ impl ElectrumClientImpl {
             }));
         }
 
-        // let sub_abortable_system = abortable_system
-        //     .create_subsystem()
-        //     .map_err(|err| ERRL!("Failed to create connection_manager abortable system: {}", err))?;
+        let sub_abortable_system = abortable_system
+            .create_subsystem()
+            .map_err(|err| ERRL!("Failed to create connection_manager abortable system: {}", err))?;
 
-        let connection_manager: Box<dyn ConnectionManagerTrait> =
-            // match client_settings.connection_manager_policy {
-            //     ConnectionManagerPolicy::Selective => Box::new(ConnectionManagerSelective::try_new_arc(
-            //         client_settings.servers,
-            //         sub_abortable_system,
-            //     )?),
-            //     ConnectionManagerPolicy::Multiple => Box::new(ConnectionManagerMultiple::try_new_arc(
-            //         client_settings.servers,
-            //         sub_abortable_system,
-            //     )?),
-            // };
-            panic!("panic for now");
+        let connection_manager: Box<dyn ConnectionManagerTrait> = match client_settings.connection_manager_policy {
+            ConnectionManagerPolicy::Selective => {
+                panic!("panic for now")
+                // Box::new(ConnectionManagerSelective::try_new_arc(
+                //     client_settings.servers,
+                //     sub_abortable_system,
+                // )?)
+            },
+            ConnectionManagerPolicy::Multiple => Box::new(ConnectionManagerMultiple::try_new_arc(
+                client_settings.servers,
+                sub_abortable_system,
+            )?),
+        };
 
         event_handlers.push(Box::new(ElectrumConnectionManagerNotifier {
             connection_manager: connection_manager.copy(),
         }));
 
-        Ok(ElectrumClientImpl {
+        let mut client_impl = Arc::new(ElectrumClientImpl {
             client_name: client_settings.client_name,
             coin_ticker: client_settings.coin_ticker,
             connection_manager,
@@ -113,32 +116,24 @@ impl ElectrumClientImpl {
             abortable_system,
             scripthash_notification_sender,
             event_handlers: Arc::new(event_handlers),
-        })
-    }
+        });
 
-    // FIXME: Make sure a connection was established here at connect
-    pub async fn connect(&self, weak_shared_self: Weak<ElectrumClientImpl>) -> Result<(), String> {
-        self.connection_manager
-            .connect(weak_shared_self)
-            .await
-            .map_err(|err| err.to_string())
+        // Initialize the connection manager.
+        client_impl
+            .connection_manager
+            .initialize(Arc::downgrade(&client_impl))
+            .map_err(|e| e.to_string())?;
+
+        Ok(client_impl)
     }
 
     /// Remove an Electrum connection and stop corresponding spawned actor.
-    pub async fn remove_server(&self, server_addr: &str) -> Result<(), String> {
+    pub async fn remove_server(&self, server_addr: &str) -> Result<Arc<ElectrumConnection>, String> {
         self.connection_manager
-            .remove_server(server_addr)
+            .remove_connection(server_addr)
             .await
             .map_err(|err| err.to_string())
     }
-
-    /// Moves the Electrum servers that fail in a multi request to the end.
-    pub async fn rotate_servers(&self, no_of_rotations: usize) {
-        self.connection_manager.rotate_servers(no_of_rotations).await
-    }
-
-    /// Check if one of the spawned connections is connected.
-    pub async fn is_connected(&self) -> bool { self.connection_manager.is_connected().await }
 
     /// Check if all connections have been removed.
     pub async fn is_connections_pool_empty(&self) -> bool { self.connection_manager.is_connections_pool_empty().await }
@@ -153,6 +148,17 @@ impl ElectrumClientImpl {
 
     /// Get the event handlers.
     pub fn event_handlers(&self) -> Arc<Vec<Box<SharableRpcTransportEventHandler>>> { self.event_handlers.clone() }
+
+    /// Sends a list of addresses through the scripthash notification sender to subscribe to their scripthash notifications.
+    pub fn subscribe_addresses(&self, addresses: HashSet<Address>) -> Result<(), String> {
+        if let Some(sender) = &self.scripthash_notification_sender {
+            sender
+                .unbounded_send(ScripthashNotification::SubscribeToAddresses(addresses))
+                .map_err(|e| ERRL!("Failed sending scripthash message. {}", e))?;
+        }
+
+        Ok(())
+    }
 
     /// Get block headers storage.
     pub fn block_headers_storage(&self) -> &BlockHeaderStorage { &self.block_headers_storage }
@@ -231,15 +237,13 @@ impl ElectrumClient {
         scripthash_notification_sender: Option<UnboundedSender<ScripthashNotification>>,
         _spawn_ping: bool,
     ) -> Result<ElectrumClient, String> {
-        let client = ElectrumClient(Arc::new(ElectrumClientImpl::try_new(
+        let client = ElectrumClient(ElectrumClientImpl::try_new_arc(
             client_settings,
             block_headers_storage,
             abortable_system,
             event_handlers,
             scripthash_notification_sender,
-        )?));
-
-        client.connect(Arc::downgrade(&client.0)).await?;
+        )?);
 
         Ok(client)
     }
@@ -254,7 +258,7 @@ impl ElectrumClient {
         request: JsonRpcRequestEnum,
     ) -> Result<(JsonRpcRemoteAddr, JsonRpcResponseEnum), JsonRpcErrorType> {
         let mut errors = vec![];
-        let connections = self.connection_manager.get_connection().await;
+        let connections = self.connection_manager.get_active_connections().await;
 
         for connection in connections {
             let json = json::to_string(&request).map_err(|e| JsonRpcErrorType::InvalidRequest(e.to_string()))?;
@@ -723,8 +727,11 @@ impl UtxoRpcClientOps for ElectrumClient {
         )
     }
 
-    fn blockchain_scripthash_subscribe(&self, scripthash: String) -> UtxoRpcFut<Json> {
-        Box::new(rpc_func!(self, BLOCKCHAIN_SCRIPTHASH_SUB_ID, scripthash).map_to_mm_fut(UtxoRpcError::from))
+    fn blockchain_scripthash_subscribe_using(&self, server_address: &str, scripthash: String) -> UtxoRpcFut<Json> {
+        Box::new(
+            rpc_func_from!(self, server_address, BLOCKCHAIN_SCRIPTHASH_SUB_ID, scripthash)
+                .map_to_mm_fut(UtxoRpcError::from),
+        )
     }
 
     /// https://electrumx.readthedocs.io/en/latest/protocol-methods.html#blockchain-transaction-get

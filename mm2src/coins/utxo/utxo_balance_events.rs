@@ -16,7 +16,7 @@ use keys::Address;
 use mm2_core::mm_ctx::MmArc;
 use mm2_event_stream::{behaviour::{EventBehaviour, EventInitStatus},
                        Event, EventStreamConfiguration};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 macro_rules! try_or_continue {
     ($exp:expr) => {
@@ -44,50 +44,20 @@ impl EventBehaviour for UtxoStandardCoin {
         ) -> Result<BTreeMap<String, Address>, String> {
             match utxo.rpc_client.clone() {
                 UtxoRpcClientEnum::Electrum(client) => {
-                    const LOOP_INTERVAL: f64 = 0.5;
+                    let scripthash_to_address_map = addresses
+                        .into_iter()
+                        .map(|address| {
+                            let scripthash = address_to_scripthash(&address).map_err(|e| e.to_string())?;
+                            Ok((scripthash, address))
+                        })
+                        .collect::<Result<HashMap<String, Address>, String>>()?;
 
-                    let mut scripthash_to_address_map: BTreeMap<String, Address> = BTreeMap::new();
-                    for address in addresses {
-                        let scripthash = address_to_scripthash(&address).map_err(|e| e.to_string())?;
+                    client
+                        .connection_manager
+                        .add_subscriptions(&scripthash_to_address_map)
+                        .await;
 
-                        scripthash_to_address_map.insert(scripthash.clone(), address);
-
-                        // Check if we have active subscription and connection for script_hash.
-                        // If found, skip to subscribing next script_hash
-                        if client
-                            .connection_manager
-                            .check_script_hash_subscription(&scripthash)
-                            .await
-                        {
-                            continue;
-                        };
-
-                        let mut attempt = 0;
-                        while let Err(e) = utxo
-                            .rpc_client
-                            .blockchain_scripthash_subscribe(scripthash.clone())
-                            .compat()
-                            .await
-                        {
-                            if attempt == 5 {
-                                return Err(e.to_string());
-                            }
-
-                            log::error!(
-                                "Failed to subscribe {} scripthash ({attempt}/5 attempt). Error: {}",
-                                scripthash,
-                                e.to_string()
-                            );
-
-                            attempt += 1;
-                            Timer::sleep(LOOP_INTERVAL).await;
-                        }
-
-                        // If subscription is successful, add to the list.
-                        client.connection_manager.add_subscription(&scripthash).await;
-                    }
-
-                    Ok(scripthash_to_address_map)
+                    Ok(scripthash_to_address_map.into_iter().map(|(k, v)| (k, v)).collect())
                 },
                 UtxoRpcClientEnum::Native(_) => {
                     Err("Balance streaming is currently not supported for native client.".to_owned())

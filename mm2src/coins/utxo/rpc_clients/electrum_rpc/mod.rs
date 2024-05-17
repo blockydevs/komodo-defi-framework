@@ -10,7 +10,7 @@ mod rpc_responses;
 #[cfg(not(target_arch = "wasm32"))] mod tcp_stream;
 
 pub use client::{ElectrumClient, ElectrumClientImpl, ElectrumClientSettings};
-pub use connection::{ElectrumConnection, ElectrumConnectionSettings};
+pub use connection::{ElectrumConnection, ElectrumConnectionErr, ElectrumConnectionSettings};
 pub use constants::*;
 pub use rpc_responses::*;
 #[cfg(not(target_arch = "wasm32"))] pub use tcp_stream::*;

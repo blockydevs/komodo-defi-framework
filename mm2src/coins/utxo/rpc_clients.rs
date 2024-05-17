@@ -27,7 +27,6 @@ use rpc::v1::types::{Bytes as BytesJson, Transaction as RpcTransaction, H256 as 
 use serde_json::{self as json, Value as Json};
 use serialization::{deserialize, serialize, serialize_with_flags, CoinVariant, CompactInteger, Reader,
                     SERIALIZE_TRANSACTION_WITNESS};
-use sha2::Digest;
 use spv_validation::helpers_validation::SPVError;
 use spv_validation::storage::BlockHeaderStorageOps;
 use std::collections::hash_map::Entry;
@@ -330,7 +329,8 @@ pub trait UtxoRpcClientOps: fmt::Debug + Send + Sync + 'static {
     /// Submits the raw `tx` transaction (serialized, hex-encoded) to blockchain network.
     fn send_raw_transaction(&self, tx: BytesJson) -> UtxoRpcFut<H256Json>;
 
-    fn blockchain_scripthash_subscribe(&self, scripthash: String) -> UtxoRpcFut<Json>;
+    /// Subscribe to scripthash notifications from `server_address` for the given `scripthash`.
+    fn blockchain_scripthash_subscribe_using(&self, server_address: &str, scripthash: String) -> UtxoRpcFut<Json>;
 
     /// Returns raw transaction (serialized, hex-encoded) by the given `txid`.
     fn get_transaction_bytes(&self, txid: &H256Json) -> UtxoRpcFut<BytesJson>;
@@ -854,7 +854,7 @@ impl UtxoRpcClientOps for NativeClient {
         Box::new(rpc_func!(self, "sendrawtransaction", tx).map_to_mm_fut(UtxoRpcError::from))
     }
 
-    fn blockchain_scripthash_subscribe(&self, _scripthash: String) -> UtxoRpcFut<Json> {
+    fn blockchain_scripthash_subscribe_using(&self, _: &str, _scripthash: String) -> UtxoRpcFut<Json> {
         Box::new(futures01::future::err(
             UtxoRpcError::Internal("blockchain_scripthash_subscribe` is not supported for Native Clients".to_owned())
                 .into(),

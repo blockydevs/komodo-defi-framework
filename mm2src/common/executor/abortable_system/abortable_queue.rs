@@ -226,6 +226,8 @@ impl QueueInnerState {
 }
 
 impl SystemInner for QueueInnerState {
+    // FIXME: We need another method `reset_system` to abort all the futures and reset the system state.
+    // We need the queue to still be functional (as we will spawn more futures after the reset).
     fn abort_all(&mut self) -> Result<(), AbortedError> {
         if matches!(self, QueueInnerState::Aborted) {
             return Err(AbortedError);
