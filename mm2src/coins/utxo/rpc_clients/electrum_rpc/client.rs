@@ -262,6 +262,7 @@ impl ElectrumClient {
 
         for connection in connections {
             let json = json::to_string(&request).map_err(|e| JsonRpcErrorType::InvalidRequest(e.to_string()))?;
+            // FIXME: Make sure we send ping requests to all the connections available.
             match connection
                 .electrum_request(json, request.rpc_id(), ELECTRUM_TIMEOUT_SEC)
                 .await
