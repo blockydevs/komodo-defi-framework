@@ -1,16 +1,14 @@
-use futures::io::Error;
-
-use rustls::client::ServerCertVerified;
-use rustls::{Certificate, ClientConfig, OwnedTrustAnchor, RootCertStore, ServerName};
-
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::SystemTime;
+
+use futures::io::Error;
+use rustls::client::ServerCertVerified;
+use rustls::{Certificate, ClientConfig, OwnedTrustAnchor, RootCertStore, ServerName};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
-
 use tokio_rustls::client::TlsStream;
 use webpki_roots::TLS_SERVER_ROOTS;
 

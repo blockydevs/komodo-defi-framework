@@ -1,28 +1,49 @@
-pub type JsonRpcPendingRequests = HashMap<JsonRpcId, async_oneshot::Sender<JsonRpcResponseEnum>>;
+use super::client::ElectrumClient;
+use super::constants::ELECTRUM_TIMEOUT_SEC;
+
+use crate::{RpcTransportEventHandler, SharableRpcTransportEventHandler};
+use common::custom_futures::timeout::FutureTimerExt;
+use common::executor::{abortable_queue::AbortableQueue, abortable_queue::WeakSpawner, AbortableSystem, SpawnFuture,
+                       Timer};
+use common::jsonrpc_client::{JsonRpcBatchResponse, JsonRpcErrorType, JsonRpcId, JsonRpcRequest, JsonRpcResponse,
+                             JsonRpcResponseEnum};
+use common::log::{error, info};
+use common::{now_float, now_ms, OrdRange};
+use mm2_rpc::data::legacy::{ElectrumProtocol, Priority};
+
+use std::collections::HashMap;
+use std::io;
+use std::net::ToSocketAddrs;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use futures::channel::oneshot as async_oneshot;
+use futures::compat::{Future01CompatExt, Stream01CompatExt};
+use futures::future::{FutureExt, TryFutureExt};
+use futures::lock::Mutex as AsyncMutex;
+use futures::select;
+use futures::stream::StreamExt;
+use futures01::sync::mpsc;
+use futures01::{Sink, Stream};
+use http::Uri;
 use serde::Serialize;
 use serde_json::{self as json, Value as Json};
 
-use common::log::{error, info};
-
 cfg_native! {
-    use futures::future::Either;
+    use super::tcp_stream::*;
 
-
-
-
-    use rustls::{ServerName};
     use std::convert::TryFrom;
 
-
-
+    use futures::future::Either;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::TcpStream;
     use tokio_rustls::{TlsConnector};
     use tokio_rustls::webpki::DnsNameRef;
-
+    use rustls::{ServerName};
 }
-use super::super::*;
-use crate::{RpcTransportEventHandler, SharableRpcTransportEventHandler};
+
+pub type JsonRpcPendingRequests = HashMap<JsonRpcId, async_oneshot::Sender<JsonRpcResponseEnum>>;
 
 macro_rules! log_and_return {
     ($typ:tt, $err:expr, $addr:expr, $conn:expr) => {{
@@ -167,7 +188,7 @@ impl ElectrumConnection {
         }
         // FIXME: This is actually not right. The system is unusable after calling abort_all
         // create a new method that aborts all the futures while keeping the system intact.
-        self.abortable_system.abort_all();
+        self.abortable_system.abort_all().ok();
     }
 
     /// Sends a request to the electrum server and waits for the response.
@@ -453,7 +474,7 @@ impl ElectrumConnection {
                     if let Err(e) = write.write_all(&bytes).await {
                         error!("Write error {e} to {address}");
                     } else {
-                        event_handlers.deref().on_outgoing_request(&bytes);
+                        event_handlers.on_outgoing_request(&bytes);
                     }
                 }
                 ElectrumConnectionErr::Temporary("Sender disconnected".to_string())

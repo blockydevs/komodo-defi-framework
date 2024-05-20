@@ -1,9 +1,11 @@
 use super::connection_managers::ConnectionManagerTrait;
 use super::constants::BLOCKCHAIN_SCRIPTHASH_SUB_ID;
+
 use crate::utxo::ScripthashNotification;
 use crate::RpcTransportEventHandler;
 use common::jsonrpc_client::JsonRpcRequest;
 use common::log::{error, warn};
+
 use futures::channel::mpsc::UnboundedSender;
 use serde_json::{self as json, Value as Json};
 
@@ -23,7 +25,7 @@ impl RpcTransportEventHandler for ElectrumScriptHashNotificationBridge {
             if let Ok(notification) = json::from_value::<JsonRpcRequest>(raw_json) {
                 // Only care about `BLOCKCHAIN_SCRIPTHASH_SUB_ID` notifications.
                 if notification.method.as_str() == BLOCKCHAIN_SCRIPTHASH_SUB_ID {
-                    if let Some(scripthash) = notification.params.first().map(|s| s.as_str()).flatten() {
+                    if let Some(scripthash) = notification.params.first().and_then(|s| s.as_str()) {
                         if let Err(e) = self
                             .scripthash_notification_sender
                             .unbounded_send(ScripthashNotification::Triggered(scripthash.to_string()))

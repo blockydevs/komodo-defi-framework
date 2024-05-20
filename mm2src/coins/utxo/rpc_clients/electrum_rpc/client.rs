@@ -1,33 +1,52 @@
-use super::super::{UnspentInfo, UtxoJsonRpcClientInfo, UtxoRpcClientOps, UtxoRpcError, UtxoRpcFut};
-
-use common::custom_iter::CollectInto;
-use common::executor::{abortable_queue::AbortableQueue, abortable_queue::WeakSpawner};
-use common::jsonrpc_client::{JsonRpcBatchClient, JsonRpcClient, JsonRpcError, JsonRpcErrorType, JsonRpcMultiClient,
-                             JsonRpcRemoteAddr, JsonRpcRequest, JsonRpcRequestEnum, JsonRpcResponseEnum,
-                             JsonRpcResponseFut, RpcRes};
-
-use common::{median, OrdRange};
-use connection_managers::ConnectionManagerTrait;
-use futures::channel::mpsc::UnboundedSender;
-use mm2_core::ConnectionManagerPolicy;
-use mm2_err_handle::prelude::*;
-use mm2_number::BigDecimal;
-
-use serde_json::{self as json, Value as Json};
-
-use std::collections::HashSet;
-use std::sync::Arc;
-
-use super::super::*;
-use super::connection_managers::ConnectionManagerMultiple;
+use super::super::{BlockHashOrHeight, EstimateFeeMethod, EstimateFeeMode, SpentOutputInfo, UnspentInfo, UnspentMap,
+                   UtxoJsonRpcClientInfo, UtxoRpcClientOps, UtxoRpcError, UtxoRpcFut};
+use super::connection::{ElectrumConnection, ElectrumConnectionSettings};
+use super::connection_managers::{ConnectionManagerMultiple, ConnectionManagerTrait};
+use super::constants::{BLOCKCHAIN_HEADERS_SUB_ID, BLOCKCHAIN_SCRIPTHASH_SUB_ID, ELECTRUM_TIMEOUT_SEC};
+use super::electrum_script_hash;
 use super::event_handlers::{ElectrumConnectionManagerNotifier, ElectrumScriptHashNotificationBridge};
 use super::rpc_responses::*;
-use super::*;
 
 use crate::utxo::rpc_clients::ConcurrentRequestMap;
 use crate::utxo::utxo_block_header_storage::BlockHeaderStorage;
-use crate::utxo::{output_script, GetBlockHeaderError, GetConfirmedTxError, GetTxHeightError};
+use crate::utxo::{output_script, GetBlockHeaderError, GetConfirmedTxError, GetTxHeightError, ScripthashNotification};
 use crate::SharableRpcTransportEventHandler;
+use chain::{BlockHeader, OutPoint, Transaction as UtxoTx, TxHashAlgo};
+use common::custom_iter::CollectInto;
+use common::executor::{abortable_queue::AbortableQueue, abortable_queue::WeakSpawner, AbortableSystem};
+use common::jsonrpc_client::{JsonRpcBatchClient, JsonRpcClient, JsonRpcError, JsonRpcErrorType, JsonRpcMultiClient,
+                             JsonRpcRemoteAddr, JsonRpcRequest, JsonRpcRequestEnum, JsonRpcResponseEnum,
+                             JsonRpcResponseFut, RpcRes};
+use common::{median, OrdRange};
+use keys::hash::H256;
+use keys::Address;
+use mm2_core::ConnectionManagerPolicy;
+use mm2_err_handle::prelude::*;
+use mm2_number::BigDecimal;
+#[cfg(test)] use mocktopus::macros::*;
+use rpc::v1::types::{Bytes as BytesJson, Transaction as RpcTransaction, H256 as H256Json};
+use serialization::{deserialize, serialize, serialize_with_flags, CoinVariant, CompactInteger, Reader,
+                    SERIALIZE_TRANSACTION_WITNESS};
+use spv_validation::helpers_validation::SPVError;
+use spv_validation::storage::BlockHeaderStorageOps;
+
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::convert::TryInto;
+use std::fmt::Debug;
+use std::num::NonZeroU64;
+use std::ops::Deref;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use futures::channel::mpsc::UnboundedSender;
+use futures::compat::Future01CompatExt;
+use futures::future::{join_all, FutureExt, TryFutureExt};
+use futures01::Future;
+use itertools::Itertools;
+use serde_json::{self as json, Value as Json};
 
 type ElectrumTxHistory = Vec<ElectrumTxHistoryItem>;
 type ElectrumScriptHash = String;
@@ -66,13 +85,13 @@ pub struct ElectrumClientImpl {
 
 #[cfg_attr(test, mockable)]
 impl ElectrumClientImpl {
-    pub fn try_new_arc(
+    fn try_new(
         client_settings: ElectrumClientSettings,
         block_headers_storage: BlockHeaderStorage,
         abortable_system: AbortableQueue,
         mut event_handlers: Vec<Box<SharableRpcTransportEventHandler>>,
         scripthash_notification_sender: Option<UnboundedSender<ScripthashNotification>>,
-    ) -> Result<Arc<ElectrumClientImpl>, String> {
+    ) -> Result<ElectrumClientImpl, String> {
         // This is used for balance event streaming implementation for UTXOs.
         // Will be used for sending scripthash messages to trigger re-connections, re-fetching the balances, etc.
         if let Some(scripthash_notification_sender) = scripthash_notification_sender.clone() {
@@ -103,7 +122,7 @@ impl ElectrumClientImpl {
             connection_manager: connection_manager.copy(),
         }));
 
-        let mut client_impl = Arc::new(ElectrumClientImpl {
+        Ok(ElectrumClientImpl {
             client_name: client_settings.client_name,
             coin_ticker: client_settings.coin_ticker,
             connection_manager,
@@ -116,8 +135,25 @@ impl ElectrumClientImpl {
             abortable_system,
             scripthash_notification_sender,
             event_handlers: Arc::new(event_handlers),
-        });
+        })
+    }
 
+    /// Create a new Electrum client instance.
+    /// This function initializes the connection manager and starts the connection process.
+    pub fn try_new_arc(
+        client_settings: ElectrumClientSettings,
+        block_headers_storage: BlockHeaderStorage,
+        abortable_system: AbortableQueue,
+        event_handlers: Vec<Box<SharableRpcTransportEventHandler>>,
+        scripthash_notification_sender: Option<UnboundedSender<ScripthashNotification>>,
+    ) -> Result<Arc<ElectrumClientImpl>, String> {
+        let client_impl = Arc::new(ElectrumClientImpl::try_new(
+            client_settings,
+            block_headers_storage,
+            abortable_system,
+            event_handlers,
+            scripthash_notification_sender,
+        )?);
         // Initialize the connection manager.
         client_impl
             .connection_manager
@@ -173,8 +209,8 @@ impl ElectrumClientImpl {
         event_handlers: Vec<Box<SharableRpcTransportEventHandler>>,
         scripthash_notification_sender: Option<UnboundedSender<ScripthashNotification>>,
         protocol_version: OrdRange<f32>,
-    ) -> ElectrumClientImpl {
-        ElectrumClientImpl {
+    ) -> Arc<ElectrumClientImpl> {
+        let client_impl = Arc::new(ElectrumClientImpl {
             protocol_version,
             ..ElectrumClientImpl::try_new(
                 client_settings,
@@ -183,8 +219,15 @@ impl ElectrumClientImpl {
                 event_handlers,
                 scripthash_notification_sender,
             )
-            .expect("Expected electrum_client_impl constructed without a problem")
-        }
+            .unwrap()
+        });
+        // Initialize the connection manager.
+        client_impl
+            .connection_manager
+            .initialize(Arc::downgrade(&client_impl))
+            .unwrap();
+
+        client_impl
     }
 }
 

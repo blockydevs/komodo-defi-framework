@@ -8,8 +8,8 @@ use crate::{utxo::{output_script,
             MarketCoinOps, MmCoin};
 
 use async_trait::async_trait;
-use common::{executor::{AbortSettings, SpawnAbortable, Timer},
-             log, Future01CompatExt};
+use common::{executor::{AbortSettings, SpawnAbortable},
+             log};
 use futures::channel::oneshot::{self, Receiver, Sender};
 use futures_util::StreamExt;
 use keys::Address;
@@ -44,6 +44,7 @@ impl EventBehaviour for UtxoStandardCoin {
         ) -> Result<BTreeMap<String, Address>, String> {
             match utxo.rpc_client.clone() {
                 UtxoRpcClientEnum::Electrum(client) => {
+                    // Collect the scrpithash for every address into a map.
                     let scripthash_to_address_map = addresses
                         .into_iter()
                         .map(|address| {
@@ -51,12 +52,13 @@ impl EventBehaviour for UtxoStandardCoin {
                             Ok((scripthash, address))
                         })
                         .collect::<Result<HashMap<String, Address>, String>>()?;
-
+                    // Add these subscriptions to the connection manager. It will choose whatever connections
+                    // it sees fit to subscribe each of these addresses to.
                     client
                         .connection_manager
                         .add_subscriptions(&scripthash_to_address_map)
                         .await;
-
+                    // Convert the hashmap back to btreemap.
                     Ok(scripthash_to_address_map.into_iter().map(|(k, v)| (k, v)).collect())
                 },
                 UtxoRpcClientEnum::Native(_) => {

@@ -4,77 +4,46 @@
 mod electrum_rpc;
 pub use electrum_rpc::*;
 
-use crate::utxo::ScripthashNotification;
+use crate::utxo::{sat_from_big_decimal, GetBlockHeaderError, GetTxError};
+use crate::{big_decimal_from_sat_unsigned, NumConversError, RpcTransportEventHandler, RpcTransportEventHandlerShared};
 use async_trait::async_trait;
-use chain::{BlockHeader, OutPoint, Transaction as UtxoTx, TransactionInput, TxHashAlgo};
+use chain::{OutPoint, Transaction as UtxoTx, TransactionInput, TxHashAlgo};
 use derive_more::Display;
 use futures::channel::oneshot as async_oneshot;
-use futures::compat::{Future01CompatExt, Stream01CompatExt};
-use futures::future::{join_all, FutureExt, TryFutureExt};
+use futures::compat::Future01CompatExt;
+use futures::future::{FutureExt, TryFutureExt};
 use futures::lock::Mutex as AsyncMutex;
-use futures::{select, StreamExt};
+use futures01::Future;
 
-use futures01::sync::mpsc;
-use futures01::{Future, Sink, Stream};
-
-use http::Uri;
-use itertools::Itertools;
 use keys::hash::H256;
 use keys::Address;
 #[cfg(test)] use mocktopus::macros::*;
 
 use rpc::v1::types::{Bytes as BytesJson, Transaction as RpcTransaction, H256 as H256Json};
 use serde_json::{self as json, Value as Json};
-use serialization::{deserialize, serialize, serialize_with_flags, CoinVariant, CompactInteger, Reader,
-                    SERIALIZE_TRANSACTION_WITNESS};
-use spv_validation::helpers_validation::SPVError;
-use spv_validation::storage::BlockHeaderStorageOps;
-use std::collections::hash_map::Entry;
+use serialization::{deserialize, serialize, serialize_with_flags, CoinVariant, SERIALIZE_TRANSACTION_WITNESS};
+
 use std::collections::HashMap;
-use std::convert::TryInto;
 use std::fmt;
 use std::fmt::Debug;
-use std::io;
-use std::net::ToSocketAddrs;
 use std::num::NonZeroU64;
 use std::ops::Deref;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
-use std::time::Duration;
 
-use common::custom_futures::timeout::FutureTimerExt;
 use common::custom_iter::TryIntoGroupMap;
-use common::executor::{abortable_queue::AbortableQueue, abortable_queue::WeakSpawner, AbortableSystem, SpawnFuture,
-                       Timer};
-use common::jsonrpc_client::{JsonRpcBatchClient, JsonRpcBatchResponse, JsonRpcClient, JsonRpcError, JsonRpcErrorType,
-                             JsonRpcId, JsonRpcRemoteAddr, JsonRpcRequest, JsonRpcRequestEnum, JsonRpcResponse,
-                             JsonRpcResponseEnum, JsonRpcResponseFut, RpcRes};
+use common::executor::Timer;
+use common::jsonrpc_client::{JsonRpcBatchClient, JsonRpcClient, JsonRpcError, JsonRpcErrorType, JsonRpcRemoteAddr,
+                             JsonRpcRequest, JsonRpcRequestEnum, JsonRpcResponseEnum, JsonRpcResponseFut, RpcRes};
 use common::log::{error, info, warn};
-use common::{median, now_float, now_ms, now_sec, OrdRange};
+use common::{median, now_sec};
 
 use mm2_err_handle::prelude::*;
 use mm2_number::{BigDecimal, MmNumber};
-use mm2_rpc::data::legacy::{ElectrumProtocol, Priority};
-
-use crate::utxo::{sat_from_big_decimal, GetBlockHeaderError, GetTxError};
-use crate::{big_decimal_from_sat_unsigned, NumConversError, RpcTransportEventHandler, RpcTransportEventHandlerShared};
 
 cfg_native! {
-
-
     use http::header::AUTHORIZATION;
     use http::{Request, StatusCode};
-
-
-
-
-
-
-
-
-
-
-
 }
 
 pub const NO_TX_ERROR_CODE: &str = "'code': -5";

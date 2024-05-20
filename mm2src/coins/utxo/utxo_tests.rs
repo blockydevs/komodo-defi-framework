@@ -1501,7 +1501,7 @@ fn test_network_info_negative_time_offset() {
 
 #[test]
 fn test_unavailable_electrum_proto_version() {
-    ElectrumClientImpl::try_new.mock_safe(
+    ElectrumClientImpl::try_new_arc.mock_safe(
         |client_settings, block_headers_storage, abortable_system, event_handlers, scripthash_notification_sender| {
             MockResult::Return(Ok(ElectrumClientImpl::with_protocol_version(
                 client_settings,

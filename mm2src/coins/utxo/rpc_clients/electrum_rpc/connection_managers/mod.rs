@@ -1,12 +1,12 @@
-use async_trait::async_trait;
-use derive_more::Display;
-use keys::Address;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::{Arc, Weak};
 
 use super::client::ElectrumClientImpl;
 use super::connection::{ElectrumConnection, ElectrumConnectionErr};
+use keys::Address;
+
+use async_trait::async_trait;
 
 mod multiple;
 pub use multiple::ConnectionManagerMultiple;

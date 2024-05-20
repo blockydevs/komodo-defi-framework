@@ -1,21 +1,20 @@
-use async_trait::async_trait;
-use futures::FutureExt;
-use gstuff::now_ms;
-use keys::Address;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock, Weak};
+
+use super::super::client::{ElectrumClient, ElectrumClientImpl};
+use super::super::connection::{ElectrumConnection, ElectrumConnectionErr, ElectrumConnectionSettings};
+use super::super::constants::SUSPEND_TIME_INIT_SEC;
+use super::{ConnectionManagerErr, ConnectionManagerTrait};
 
 use crate::utxo::rpc_clients::UtxoRpcClientOps;
 use common::executor::abortable_queue::AbortableQueue;
 use common::executor::{AbortableSystem, SpawnFuture, Timer};
 use common::log::warn;
-use futures::compat::Future01CompatExt;
+use keys::Address;
 
-use super::super::client::{ElectrumClient, ElectrumClientImpl};
-use super::super::connection::{ElectrumConnection, ElectrumConnectionErr, ElectrumConnectionSettings};
-use super::super::constants::SUSPEND_TIME_INIT_SEC;
-use super::ConnectionManagerErr;
-use super::ConnectionManagerTrait;
+use async_trait::async_trait;
+use futures::compat::Future01CompatExt;
+use gstuff::now_ms;
 
 /// A struct that encapsulates an Electrum connection and its information.
 #[derive(Debug)]
@@ -77,7 +76,7 @@ impl ConnectionManagerMultiple {
             .read()
             .unwrap()
             .as_ref()
-            .and_then(|weak| weak.upgrade().and_then(|client| Some(ElectrumClient(client))))
+            .and_then(|weak| weak.upgrade().map(ElectrumClient))
     }
 
     /// Returns an iterator over all the connections we have, even removed ones.
@@ -118,7 +117,9 @@ impl ConnectionManagerTrait for Arc<ConnectionManagerMultiple> {
             async move {
                 // First, Connect to all servers.
                 for connection in manager.get_all_connections() {
-                    ElectrumConnection::establish_connection_loop(connection, electrum_client.clone()).await;
+                    ElectrumConnection::establish_connection_loop(connection, electrum_client.clone())
+                        .await
+                        .ok();
                 }
                 // Then, watch for disconnections to reconnect them back after timeout.
                 watch_for_disconnections(manager).await;
@@ -207,10 +208,11 @@ impl ConnectionManagerTrait for Arc<ConnectionManagerMultiple> {
             }
             // Try to subscribe the address to any connection we have.
             for connection in connections {
-                if let Ok(_) = client
+                if client
                     .blockchain_scripthash_subscribe_using(connection.address(), scripthash.clone())
                     .compat()
                     .await
+                    .is_ok()
                 {
                     if let Some(connection_ctx) = self.connections.get(connection.address()) {
                         connection_ctx.subs.lock().unwrap().push(address);
@@ -287,7 +289,9 @@ async fn watch_for_disconnections(manager: Arc<ConnectionManagerMultiple>) -> Op
         if manager.get_active_connections().await.is_empty() {
             let client = manager.get_client()?;
             for connection in manager.get_all_connections() {
-                ElectrumConnection::establish_connection_loop(connection, client.clone()).await;
+                ElectrumConnection::establish_connection_loop(connection, client.clone())
+                    .await
+                    .ok();
             }
             continue;
         }
@@ -317,7 +321,9 @@ async fn watch_for_disconnections(manager: Arc<ConnectionManagerMultiple>) -> Op
         for (suspend_until, address) in wake_address_when.iter() {
             if now >= *suspend_until {
                 let connection = manager.get_connection(address)?;
-                ElectrumConnection::establish_connection_loop(connection, client.clone()).await;
+                ElectrumConnection::establish_connection_loop(connection, client.clone())
+                    .await
+                    .ok();
                 reconnected_addresses.insert((*suspend_until, address.clone()));
             } else {
                 // We can break since the `suspend_until` is sorted ascendingly.
