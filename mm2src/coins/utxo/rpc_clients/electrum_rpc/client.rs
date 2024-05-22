@@ -277,6 +277,7 @@ impl ElectrumClient {
         block_headers_storage: BlockHeaderStorage,
         abortable_system: AbortableQueue,
         scripthash_notification_sender: Option<UnboundedSender<ScripthashNotification>>,
+        // FIXME: Actually ping. To keep the connections alive.
         _spawn_ping: bool,
     ) -> Result<ElectrumClient, String> {
         let client = ElectrumClient(ElectrumClientImpl::try_new_arc(
