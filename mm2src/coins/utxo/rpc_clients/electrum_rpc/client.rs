@@ -654,19 +654,16 @@ impl ElectrumClient {
     pub(crate) fn get_servers_with_latest_block_count(&self) -> UtxoRpcFut<(Vec<String>, u64)> {
         let selfi = self.clone();
         let fut = async move {
-            // FIXME: Replace this with a `.get_all_addresses` from the connection manager.
-            let connections: Vec<ElectrumConnection> = vec![];
-            let futures = connections
-                .iter()
-                .map(|connection| {
-                    let address = connection.address().to_string();
+            let addresses = selfi.connection_manager.get_all_server_addresses();
+            let futures = addresses
+                .into_iter()
+                .map(|address| {
                     selfi
                         .get_block_count_from(&address)
                         .map(|response| (address, response))
                         .compat()
                 })
                 .collect::<Vec<_>>();
-            drop(connections);
 
             let responses = join_all(futures).await;
 

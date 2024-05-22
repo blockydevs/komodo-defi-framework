@@ -25,6 +25,9 @@ pub trait ConnectionManagerTrait: Debug + Send + Sync {
     /// Returns all the currently active connections.
     async fn get_active_connections(&self) -> Vec<Arc<ElectrumConnection>>;
 
+    /// Returns all the server addresses.
+    fn get_all_server_addresses(&self) -> Vec<String>;
+
     /// Retrieve a specific electrum connection by its address.
     /// The connection will be forcibly established if it's disconnected.
     async fn get_connection_by_address(

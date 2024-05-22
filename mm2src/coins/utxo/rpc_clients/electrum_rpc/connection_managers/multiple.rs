@@ -141,6 +141,10 @@ impl ConnectionManagerTrait for Arc<ConnectionManagerMultiple> {
         connections
     }
 
+    fn get_all_server_addresses(&self) -> Vec<String> {
+        self.connections.keys().cloned().collect()
+    }
+
     async fn get_connection_by_address(
         &self,
         server_address: &str,
