@@ -300,28 +300,42 @@ impl ElectrumClient {
         self,
         request: JsonRpcRequestEnum,
     ) -> Result<(JsonRpcRemoteAddr, JsonRpcResponseEnum), JsonRpcErrorType> {
-        let mut errors = vec![];
+        // Whether to send the request to all the connections or not.
+        let send_to_all = match request {
+            JsonRpcRequestEnum::Single(ref req) => req.method == "server.ping",
+            JsonRpcRequestEnum::Batch(_) => false,
+        };
+        // Request id and serialized request.
+        let req_id = request.rpc_id();
+        let request = json::to_string(&request).map_err(|e| JsonRpcErrorType::InvalidRequest(e.to_string()))?;
+
         let connections = self.connection_manager.get_active_connections().await;
-
-        for connection in connections {
-            let json = json::to_string(&request).map_err(|e| JsonRpcErrorType::InvalidRequest(e.to_string()))?;
-            // FIXME: Make sure we send ping requests to all the connections available.
-            match connection
-                .electrum_request(json, request.rpc_id(), ELECTRUM_TIMEOUT_SEC)
-                .await
-            {
-                Ok(response) => return Ok((JsonRpcRemoteAddr(connection.address().to_string()), response)),
-                Err(e) => errors.push((connection.address().to_string(), e)),
-            }
-        }
-
-        if errors.is_empty() {
+        if connections.is_empty() {
             return Err(JsonRpcErrorType::Transport("No connections available".to_string()));
         }
 
-        return Err(JsonRpcErrorType::Transport(format!(
-            "Failed to perform request {request:?}, errors: {errors:?}"
-        )));
+        let mut final_response = None;
+        let mut errors = vec![];
+        for connection in connections {
+            let address = connection.address().to_string();
+            match connection
+                .electrum_request(request.clone(), req_id.clone(), ELECTRUM_TIMEOUT_SEC)
+                .await
+            {
+                Ok(response) => {
+                    final_response = Some((JsonRpcRemoteAddr(address), response));
+                    // Break if we don't need to send the request to all the connections.
+                    if !send_to_all {
+                        break;
+                    }
+                },
+                Err(e) => errors.push((address, e)),
+            }
+        }
+
+        final_response.ok_or_else(|| {
+            JsonRpcErrorType::Transport(format!("Failed to perform request {request:?} , errors: {errors:?}"))
+        })
     }
 
     /// Sends a JSONRPC request to a specific electrum server.
