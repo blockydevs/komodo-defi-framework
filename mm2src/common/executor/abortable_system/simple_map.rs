@@ -35,7 +35,7 @@ impl<FutureId: FutureIdTrait> AbortableSimpleMap<FutureId> {
 impl<FutureId: FutureIdTrait> AbortableSystem for AbortableSimpleMap<FutureId> {
     type Inner = SimpleMapInnerState<FutureId>;
 
-    fn abort_all(&self) -> Result<(), AbortedError> { self.inner.lock().abort_all() }
+    fn __inner(&self) -> InnerShared<Self::Inner> { self.inner.clone() }
 
     fn __push_subsystem_abort_tx(&self, subsystem_abort_tx: oneshot::Sender<()>) -> Result<(), AbortedError> {
         self.inner.lock().insert_subsystem(subsystem_abort_tx)

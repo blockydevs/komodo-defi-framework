@@ -186,9 +186,7 @@ impl ElectrumConnection {
         if let Some(reason) = reason {
             self.set_last_error(reason).await;
         }
-        // FIXME: This is actually not right. The system is unusable after calling abort_all
-        // create a new method that aborts all the futures while keeping the system intact.
-        self.abortable_system.abort_all().ok();
+        self.abortable_system.abort_all_and_reset().ok();
     }
 
     /// Sends a request to the electrum server and waits for the response.
