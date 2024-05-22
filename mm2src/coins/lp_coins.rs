@@ -3774,9 +3774,6 @@ pub enum CoinProtocol {
     },
 }
 
-pub type RpcTransportEventHandlerShared = Arc<dyn RpcTransportEventHandler + Send + Sync + 'static>;
-pub type SharableRpcTransportEventHandler = dyn RpcTransportEventHandler + Send + Sync;
-
 /// Common methods to handle the connection events.
 ///
 /// Note that the handler methods are sync and shouldn't take long time executing, otherwise it will hurt the performance.
@@ -3793,8 +3790,10 @@ pub trait RpcTransportEventHandler {
     fn on_disconnected(&self, _address: &str) -> Result<(), String> { Ok(()) }
 }
 
-// FIXME: Remove send and sync here, shoudn't need those.
-impl fmt::Debug for dyn RpcTransportEventHandler + Send + Sync {
+pub type SharableRpcTransportEventHandler = dyn RpcTransportEventHandler + Send + Sync;
+pub type RpcTransportEventHandlerShared = Arc<SharableRpcTransportEventHandler>;
+
+impl fmt::Debug for SharableRpcTransportEventHandler {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "{}", self.debug_info()) }
 }
 
