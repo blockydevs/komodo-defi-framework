@@ -262,8 +262,7 @@ impl JsonRpcMultiClient for ElectrumClient {
         Box::new(
             self.clone()
                 .electrum_request_to(to_addr.clone(), request)
-                // FIXME: Remove the async move if possible.
-                .and_then(|response| async move { Ok((JsonRpcRemoteAddr(to_addr), response)) })
+                .map_ok(|response| (JsonRpcRemoteAddr(to_addr), response))
                 .boxed()
                 .compat(),
         )
