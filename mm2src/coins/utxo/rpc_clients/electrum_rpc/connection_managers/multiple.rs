@@ -61,7 +61,7 @@ impl ConnectionManagerMultiple {
             connections.insert(connection.address().to_string(), ConnectionContext {
                 connection: Arc::new(connection),
                 subs: Mutex::new(Vec::new()),
-                next_suspend_time: Mutex::new(SUSPEND_TIME_INIT_SEC * 1000),
+                next_suspend_time: Mutex::new(SUSPEND_TIME_INIT_SEC),
             });
         }
 
@@ -254,12 +254,12 @@ impl ConnectionManagerTrait for Arc<ConnectionManagerMultiple> {
         };
 
         // Reset the suspend time.
-        *connection_ctx.next_suspend_time.lock().unwrap() = SUSPEND_TIME_INIT_SEC * 1000;
+        *connection_ctx.next_suspend_time.lock().unwrap() = SUSPEND_TIME_INIT_SEC;
     }
 
     fn on_disconnected(&self, server_address: &str) {
         // The max time to suspend a server, 12h.
-        const MAX_SUSPEND_TIME: u64 = 12 * 60 * 60 * 1000;
+        const MAX_SUSPEND_TIME: u64 = 12 * 60 * 60;
         let Some(connection_ctx) = self.connections.get(server_address) else {
             warn!("No connection found for address: {server_address}");
             return;
@@ -341,7 +341,7 @@ async fn watch_for_disconnections(manager: Arc<ConnectionManagerMultiple>) -> Op
         let mut reconnected_addresses = HashSet::new();
         let client = manager.get_client()?;
         for (suspend_until, address) in wake_address_when.iter() {
-            if now >= *suspend_until {
+            if now >= *suspend_until * 1000 {
                 let connection = manager.get_connection(address)?;
                 ElectrumConnection::establish_connection_loop(connection, client.clone())
                     .await
@@ -359,7 +359,7 @@ async fn watch_for_disconnections(manager: Arc<ConnectionManagerMultiple>) -> Op
         }
         drop(client);
 
-        // Sleep for a second before checking again.
-        Timer::sleep(1.).await;
+        // Sleep for 5 seconds before checking again.
+        Timer::sleep(5.).await;
     }
 }
