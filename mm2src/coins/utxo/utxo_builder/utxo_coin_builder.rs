@@ -566,6 +566,7 @@ pub trait UtxoCoinBuilderCommonOps {
             client_name: format!("{} GUI/MM2 {}", gui, mm_version),
             servers: servers.clone(),
             coin_ticker,
+            spawn_ping: args.spawn_ping,
             negotiate_version: args.negotiate_version,
             connection_manager_policy: ctx.electrum_connection_manager_policy(),
         };
@@ -576,7 +577,6 @@ pub trait UtxoCoinBuilderCommonOps {
             block_headers_storage,
             abortable_system,
             scripthash_notification_sender,
-            args.spawn_ping,
         )
         .await
         .map_to_mm(UtxoCoinBuildError::Internal)

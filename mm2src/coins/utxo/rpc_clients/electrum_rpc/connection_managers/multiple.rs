@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use super::super::client::{ElectrumClient, ElectrumClientImpl};
 use super::super::connection::{ElectrumConnection, ElectrumConnectionErr, ElectrumConnectionSettings};
-use super::super::constants::SUSPEND_TIME_INIT_SEC;
+use super::super::constants::{PING_TIMEOUT_SEC, SUSPEND_TIME_INIT_SEC};
 use super::{ConnectionManagerErr, ConnectionManagerTrait};
 
 use crate::utxo::rpc_clients::UtxoRpcClientOps;
@@ -30,6 +30,8 @@ struct ConnectionContext {
 /// you wanna have a force wake method to wake up suspended servers that were queried specifically
 #[derive(Debug)]
 pub struct ConnectionManagerMultiple {
+    /// A flag to spawn a ping loop task for each connection.
+    spawn_ping: bool,
     /// A map for server addresses to their corresponding connections.
     connections: HashMap<String, ConnectionContext>,
     /// A weak reference to the electrum client that owns this connection manager.
@@ -42,6 +44,7 @@ pub struct ConnectionManagerMultiple {
 impl ConnectionManagerMultiple {
     pub fn try_new_arc(
         servers: Vec<ElectrumConnectionSettings>,
+        spawn_ping: bool,
         abortable_system: AbortableQueue,
     ) -> Result<Arc<Self>, String> {
         let mut connections = HashMap::with_capacity(servers.len());
@@ -63,6 +66,7 @@ impl ConnectionManagerMultiple {
         }
 
         Ok(Arc::new(ConnectionManagerMultiple {
+            spawn_ping,
             connections,
             electrum_client: RwLock::new(None),
         }))
@@ -128,6 +132,22 @@ impl ConnectionManagerTrait for Arc<ConnectionManagerMultiple> {
         // Use the client's spawner to spawn the connection manager's background task.
         electrum_client.weak_spawner().spawn(background_task);
 
+        if self.spawn_ping {
+            let ping_task = {
+                let manager = self.clone();
+                async move {
+                    loop {
+                        let Some(client) = manager.get_client() else { break };
+                        // This will ping all the active connections, which will keep these connections alive.
+                        client.server_ping().compat().await.ok();
+                        Timer::sleep(PING_TIMEOUT_SEC as f64).await;
+                    }
+                }
+            };
+            // Use the client's spawner to spawn the connection manager's ping task.
+            electrum_client.weak_spawner().spawn(ping_task);
+        }
+
         Ok(())
     }
 
@@ -141,9 +161,7 @@ impl ConnectionManagerTrait for Arc<ConnectionManagerMultiple> {
         connections
     }
 
-    fn get_all_server_addresses(&self) -> Vec<String> {
-        self.connections.keys().cloned().collect()
-    }
+    fn get_all_server_addresses(&self) -> Vec<String> { self.connections.keys().cloned().collect() }
 
     async fn get_connection_by_address(
         &self,

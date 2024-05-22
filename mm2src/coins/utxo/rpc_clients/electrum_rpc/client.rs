@@ -58,6 +58,7 @@ pub struct ElectrumClientSettings {
     pub servers: Vec<ElectrumConnectionSettings>,
     pub coin_ticker: String,
     pub negotiate_version: bool,
+    pub spawn_ping: bool,
     pub connection_manager_policy: ConnectionManagerPolicy,
 }
 
@@ -109,11 +110,13 @@ impl ElectrumClientImpl {
                 panic!("panic for now")
                 // Box::new(ConnectionManagerSelective::try_new_arc(
                 //     client_settings.servers,
+                //     client_settings.spawn_ping,
                 //     sub_abortable_system,
                 // )?)
             },
             ConnectionManagerPolicy::Multiple => Box::new(ConnectionManagerMultiple::try_new_arc(
                 client_settings.servers,
+                client_settings.spawn_ping,
                 sub_abortable_system,
             )?),
         };
@@ -277,8 +280,6 @@ impl ElectrumClient {
         block_headers_storage: BlockHeaderStorage,
         abortable_system: AbortableQueue,
         scripthash_notification_sender: Option<UnboundedSender<ScripthashNotification>>,
-        // FIXME: Actually ping. To keep the connections alive.
-        _spawn_ping: bool,
     ) -> Result<ElectrumClient, String> {
         let client = ElectrumClient(ElectrumClientImpl::try_new_arc(
             client_settings,

@@ -478,6 +478,7 @@ fn test_wait_for_payment_spend_timeout_electrum() {
         client_name: "test".to_string(),
         servers: vec![],
         coin_ticker: TEST_COIN_NAME.into(),
+        spawn_ping: true,
         negotiate_version: true,
         connection_manager_policy: ConnectionManagerPolicy::default(),
     };
@@ -487,7 +488,6 @@ fn test_wait_for_payment_spend_timeout_electrum() {
         block_headers_storage,
         abortable_system,
         None,
-        false,
     ))
     .expect("Expected electrum_client_impl constructed without a problem");
     let client = UtxoRpcClientEnum::Electrum(client);
