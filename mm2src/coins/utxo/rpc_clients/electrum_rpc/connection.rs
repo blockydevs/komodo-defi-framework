@@ -13,20 +13,19 @@ use mm2_rpc::data::legacy::{ElectrumProtocol, Priority};
 
 use std::collections::HashMap;
 use std::io;
-use std::net::ToSocketAddrs;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
-use std::time::Duration;
 
 use futures::channel::oneshot as async_oneshot;
 use futures::compat::{Future01CompatExt, Stream01CompatExt};
-use futures::future::{FutureExt, TryFutureExt};
+use futures::future::FutureExt;
 use futures::lock::Mutex as AsyncMutex;
 use futures::select;
 use futures::stream::StreamExt;
 use futures01::sync::mpsc;
 use futures01::{Sink, Stream};
 use http::Uri;
+use instant::Instant;
 use serde::Serialize;
 use serde_json::{self as json, Value as Json};
 
@@ -34,8 +33,9 @@ cfg_native! {
     use super::tcp_stream::*;
 
     use std::convert::TryFrom;
+    use std::net::ToSocketAddrs;
 
-    use futures::future::Either;
+    use futures::future::{Either, TryFutureExt};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::TcpStream;
     use tokio_rustls::{TlsConnector};
@@ -91,7 +91,7 @@ pub struct ElectrumConnectionSettings {
     pub disable_cert_verification: bool,
     #[serde(default)]
     pub priority: Priority,
-    pub timeout_sec: Option<u64>,
+    pub timeout_sec: Option<f64>,
 }
 
 #[derive(Clone, Debug)]
@@ -196,7 +196,7 @@ impl ElectrumConnection {
         &self,
         mut req_json: String,
         rpc_id: JsonRpcId,
-        timeout: u64,
+        timeout: f64,
     ) -> Result<JsonRpcResponseEnum, JsonRpcErrorType> {
         #[cfg(not(target_arch = "wasm"))]
         {
@@ -224,7 +224,7 @@ impl ElectrumConnection {
 
         // Wait for the response to be processed and sent back to us.
         res_rx
-            .timeout(Duration::from_secs(timeout))
+            .timeout_secs(timeout)
             .await
             .map_err(|e| JsonRpcErrorType::Transport(e.to_string()))?
             .map_err(|_e| JsonRpcErrorType::Transport("The sender didn't send".to_string()))
@@ -401,10 +401,19 @@ impl ElectrumConnection {
             },
         };
 
-        let _timeout = connection.settings.timeout_sec.unwrap_or(ELECTRUM_TIMEOUT_SEC);
-        // FIXME: Add a timeout for connection establishment.
-        // Use what's left of the timeout to query for the server version.
-        let stream = log_and_return_if_err!(connect_f.await, Temporary, address, connection);
+        let timeout = connection.settings.timeout_sec.unwrap_or(ELECTRUM_TIMEOUT_SEC);
+        let now = Instant::now();
+        let Ok(connect_f) = connect_f.boxed().timeout_secs(timeout).await else {
+            log_and_return!(
+                Temporary,
+                format!("Timed out ({timeout}s) while trying to connect"),
+                address,
+                connection
+            );
+        };
+        // We will use the remaining timeout for version checking.
+        let remaining_timeout = (timeout - now.elapsed().as_secs_f64()).max(0.0);
+        let stream = log_and_return_if_err!(connect_f, Temporary, address, connection);
         log_and_return_if_err!(stream.as_ref().set_nodelay(true), Temporary, address, connection);
 
         match secure_connection {
@@ -417,9 +426,9 @@ impl ElectrumConnection {
             let last_response = last_response.clone();
             async move {
                 loop {
-                    Timer::sleep(ELECTRUM_TIMEOUT_SEC as f64).await;
+                    Timer::sleep(ELECTRUM_TIMEOUT_SEC).await;
                     let last_sec = (last_response.load(AtomicOrdering::Relaxed) / 1000) as f64;
-                    if now_float() - last_sec > ELECTRUM_TIMEOUT_SEC as f64 {
+                    if now_float() - last_sec > ELECTRUM_TIMEOUT_SEC {
                         break ElectrumConnectionErr::Temporary(format!(
                             "Server didn't respond for too long ({}s).",
                             now_float() - last_sec
@@ -510,39 +519,49 @@ impl ElectrumConnection {
         };
         connection.weak_spawner().spawn(connection_loop);
 
-        // FIXME: Use the remainder of the connection timeout here.
         let version = match client
             .server_version(&address, client.protocol_version())
             .compat()
+            .timeout_secs(remaining_timeout)
             .await
         {
-            Err(e) => disconnect_and_return_error!(
-                ElectrumConnectionErr::Temporary(format!("Error querying electrum server version {e:?}")),
+            Err(_) => disconnect_and_return_error!(
+                ElectrumConnectionErr::Temporary(format!(
+                    "Timed out ({remaining_timeout}s) while querying electrum server version"
+                )),
                 address,
                 connection,
                 event_handlers
             ),
-            Ok(version_str) => match version_str.protocol_version.parse::<f32>() {
+            Ok(response) => match response {
                 Err(e) => disconnect_and_return_error!(
-                    // FIXME: Relax the error type here?
-                    ElectrumConnectionErr::Irrecoverable(format!("Failed to parse electrum server version {e:?}")),
+                    ElectrumConnectionErr::Temporary(format!("Error querying electrum server version {e:?}")),
                     address,
                     connection,
                     event_handlers
                 ),
-                Ok(version_f32) => {
-                    if client.negotiate_version() {
-                        let client_version_range = client.protocol_version();
-                        if !client_version_range.contains(&version_f32) {
-                            disconnect_and_return_error!(
-                                ElectrumConnectionErr::VersionMismatch(client_version_range.clone(), version_f32),
-                                address,
-                                connection,
-                                event_handlers
-                            )
+                Ok(version_str) => match version_str.protocol_version.parse::<f32>() {
+                    Err(e) => disconnect_and_return_error!(
+                        // FIXME: Relax the error type here?
+                        ElectrumConnectionErr::Irrecoverable(format!("Failed to parse electrum server version {e:?}")),
+                        address,
+                        connection,
+                        event_handlers
+                    ),
+                    Ok(version_f32) => {
+                        if client.negotiate_version() {
+                            let client_version_range = client.protocol_version();
+                            if !client_version_range.contains(&version_f32) {
+                                disconnect_and_return_error!(
+                                    ElectrumConnectionErr::VersionMismatch(client_version_range.clone(), version_f32),
+                                    address,
+                                    connection,
+                                    event_handlers
+                                )
+                            }
                         }
-                    }
-                    version_f32
+                        version_f32
+                    },
                 },
             },
         };
@@ -611,15 +630,26 @@ impl ElectrumConnection {
             },
         };
 
-        let mut timeout = connection.settings.timeout_sec.unwrap_or(ELECTRUM_TIMEOUT_SEC);
-        let conn_idx = CONN_IDX.fetch_add(1, AtomicOrdering::Relaxed);
-        // FIXME: Add a timeout for connection establishment, and use the remainder of the timeout to query for the server version.
-        let (mut transport_tx, mut transport_rx) = log_and_return_if_err!(
-            ws_transport(conn_idx, &address, &connection.weak_spawner()).await,
-            Temporary,
-            address,
-            connection
-        );
+        let timeout = connection.settings.timeout_sec.unwrap_or(ELECTRUM_TIMEOUT_SEC);
+        let now = Instant::now();
+        let Ok(connect_f) = ws_transport(
+            CONN_IDX.fetch_add(1, AtomicOrdering::Relaxed),
+            &address,
+            &connection.weak_spawner()
+        )
+        .boxed()
+        .timeout_secs(timeout)
+        .await else {
+            log_and_return!(
+                Temporary,
+                format!("Timed out ({timeout}s) while trying to connect"),
+                address,
+                connection
+            );
+        };
+        // We will use the remaining timeout for version checking.
+        let remaining_timeout = (timeout - now.elapsed().as_secs_f64()).max(0.0);
+        let (mut transport_tx, mut transport_rx) = log_and_return_if_err!(connect_f, Temporary, address, connection);
 
         match secure_connection {
             true => info!("Electrum client connected to {address} securely"),
@@ -631,9 +661,9 @@ impl ElectrumConnection {
             let last_response = last_response.clone();
             async move {
                 loop {
-                    Timer::sleep(ELECTRUM_TIMEOUT_SEC as f64).await;
+                    Timer::sleep(ELECTRUM_TIMEOUT_SEC).await;
                     let last_sec = (last_response.load(AtomicOrdering::Relaxed) / 1000) as f64;
-                    if now_float() - last_sec > ELECTRUM_TIMEOUT_SEC as f64 {
+                    if now_float() - last_sec > ELECTRUM_TIMEOUT_SEC {
                         break ElectrumConnectionErr::Temporary(format!(
                             "Server didn't respond for too long ({}s).",
                             now_float() - last_sec
@@ -726,38 +756,49 @@ impl ElectrumConnection {
         };
         connection.weak_spawner().spawn(connection_loop);
 
-        // FIXME: Use the remainder of the connection timeout here.
         let version = match client
             .server_version(&address, client.protocol_version())
             .compat()
+            .timeout_secs(remaining_timeout)
             .await
         {
-            Err(e) => disconnect_and_return_error!(
-                ElectrumConnectionErr::Temporary(format!("Error querying electrum server version {e:?}")),
+            Err(_) => disconnect_and_return_error!(
+                ElectrumConnectionErr::Temporary(format!(
+                    "Timed out ({remaining_timeout}s) while querying electrum server version"
+                )),
                 address,
                 connection,
                 event_handlers
             ),
-            Ok(version_str) => match version_str.protocol_version.parse::<f32>() {
+            Ok(response) => match response {
                 Err(e) => disconnect_and_return_error!(
-                    ElectrumConnectionErr::Temporary(format!("Failed to parse electrum server version {e:?}")),
+                    ElectrumConnectionErr::Temporary(format!("Error querying electrum server version {e:?}")),
                     address,
                     connection,
                     event_handlers
                 ),
-                Ok(version_f32) => {
-                    if client.negotiate_version() {
-                        let client_version_range = client.protocol_version();
-                        if !client_version_range.contains(&version_f32) {
-                            disconnect_and_return_error!(
-                                ElectrumConnectionErr::VersionMismatch(client_version_range.clone(), version_f32),
-                                address,
-                                connection,
-                                event_handlers
-                            )
+                Ok(version_str) => match version_str.protocol_version.parse::<f32>() {
+                    Err(e) => disconnect_and_return_error!(
+                        // FIXME: Relax the error type here?
+                        ElectrumConnectionErr::Irrecoverable(format!("Failed to parse electrum server version {e:?}")),
+                        address,
+                        connection,
+                        event_handlers
+                    ),
+                    Ok(version_f32) => {
+                        if client.negotiate_version() {
+                            let client_version_range = client.protocol_version();
+                            if !client_version_range.contains(&version_f32) {
+                                disconnect_and_return_error!(
+                                    ElectrumConnectionErr::VersionMismatch(client_version_range.clone(), version_f32),
+                                    address,
+                                    connection,
+                                    event_handlers
+                                )
+                            }
                         }
-                    }
-                    version_f32
+                        version_f32
+                    },
                 },
             },
         };

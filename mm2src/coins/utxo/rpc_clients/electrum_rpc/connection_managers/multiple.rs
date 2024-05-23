@@ -140,7 +140,7 @@ impl ConnectionManagerTrait for Arc<ConnectionManagerMultiple> {
                         let Some(client) = manager.get_client() else { break };
                         // This will ping all the active connections, which will keep these connections alive.
                         client.server_ping().compat().await.ok();
-                        Timer::sleep(PING_TIMEOUT_SEC as f64).await;
+                        Timer::sleep(PING_TIMEOUT_SEC).await;
                     }
                 }
             };

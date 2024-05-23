@@ -5,7 +5,7 @@ mod electrum_rpc;
 pub use electrum_rpc::*;
 
 use crate::utxo::{sat_from_big_decimal, GetBlockHeaderError, GetTxError};
-use crate::{big_decimal_from_sat_unsigned, NumConversError, RpcTransportEventHandler, RpcTransportEventHandlerShared};
+use crate::{big_decimal_from_sat_unsigned, NumConversError, RpcTransportEventHandlerShared};
 use async_trait::async_trait;
 use chain::{OutPoint, Transaction as UtxoTx, TransactionInput, TxHashAlgo};
 use derive_more::Display;
@@ -33,8 +33,8 @@ use std::sync::Arc;
 
 use common::custom_iter::TryIntoGroupMap;
 use common::executor::Timer;
-use common::jsonrpc_client::{JsonRpcBatchClient, JsonRpcClient, JsonRpcError, JsonRpcErrorType, JsonRpcRemoteAddr,
-                             JsonRpcRequest, JsonRpcRequestEnum, JsonRpcResponseEnum, JsonRpcResponseFut, RpcRes};
+use common::jsonrpc_client::{JsonRpcBatchClient, JsonRpcClient, JsonRpcError, JsonRpcErrorType, JsonRpcRequest,
+                             JsonRpcRequestEnum, JsonRpcResponseFut, RpcRes};
 use common::log::{error, info, warn};
 use common::{median, now_sec};
 
@@ -42,6 +42,9 @@ use mm2_err_handle::prelude::*;
 use mm2_number::{BigDecimal, MmNumber};
 
 cfg_native! {
+    use crate::RpcTransportEventHandler;
+
+    use common::jsonrpc_client::{JsonRpcRemoteAddr, JsonRpcResponseEnum};
     use http::header::AUTHORIZATION;
     use http::{Request, StatusCode};
 }
