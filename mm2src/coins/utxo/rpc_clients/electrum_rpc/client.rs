@@ -2,7 +2,7 @@ use super::super::{BlockHashOrHeight, EstimateFeeMethod, EstimateFeeMode, SpentO
                    UtxoJsonRpcClientInfo, UtxoRpcClientOps, UtxoRpcError, UtxoRpcFut};
 use super::connection::{ElectrumConnection, ElectrumConnectionSettings};
 use super::connection_managers::{ConnectionManagerMultiple, ConnectionManagerTrait};
-use super::constants::{BLOCKCHAIN_HEADERS_SUB_ID, BLOCKCHAIN_SCRIPTHASH_SUB_ID, ELECTRUM_TIMEOUT_SEC};
+use super::constants::{BLOCKCHAIN_HEADERS_SUB_ID, BLOCKCHAIN_SCRIPTHASH_SUB_ID, ELECTRUM_REQUEST_TIMEOUT};
 use super::electrum_script_hash;
 use super::event_handlers::{ElectrumConnectionManagerNotifier, ElectrumScriptHashNotificationBridge};
 use super::rpc_responses::*;
@@ -320,7 +320,7 @@ impl ElectrumClient {
         for connection in connections {
             let address = connection.address().to_string();
             match connection
-                .electrum_request(request.clone(), req_id.clone(), ELECTRUM_TIMEOUT_SEC)
+                .electrum_request(request.clone(), req_id.clone(), ELECTRUM_REQUEST_TIMEOUT)
                 .await
             {
                 Ok(response) => {
@@ -356,7 +356,7 @@ impl ElectrumClient {
 
         let json = json::to_string(&request).map_err(|err| JsonRpcErrorType::InvalidRequest(err.to_string()))?;
         let response = connection
-            .electrum_request(json, request.rpc_id(), ELECTRUM_TIMEOUT_SEC)
+            .electrum_request(json, request.rpc_id(), ELECTRUM_REQUEST_TIMEOUT)
             .await?;
 
         Ok(response)

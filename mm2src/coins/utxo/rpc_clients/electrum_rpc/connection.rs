@@ -1,5 +1,5 @@
 use super::client::ElectrumClient;
-use super::constants::ELECTRUM_TIMEOUT_SEC;
+use super::constants::{CUTOFF_TIMEOUT, DEFAULT_CONNECTION_ESTABLISHMENT_TIMEOUT};
 
 use crate::{RpcTransportEventHandler, SharableRpcTransportEventHandler};
 use common::custom_futures::timeout::FutureTimerExt;
@@ -401,7 +401,10 @@ impl ElectrumConnection {
             },
         };
 
-        let timeout = connection.settings.timeout_sec.unwrap_or(ELECTRUM_TIMEOUT_SEC);
+        let timeout = connection
+            .settings
+            .timeout_sec
+            .unwrap_or(DEFAULT_CONNECTION_ESTABLISHMENT_TIMEOUT);
         let now = Instant::now();
         let Ok(connect_f) = connect_f.boxed().timeout_secs(timeout).await else {
             log_and_return!(
@@ -426,9 +429,9 @@ impl ElectrumConnection {
             let last_response = last_response.clone();
             async move {
                 loop {
-                    Timer::sleep(ELECTRUM_TIMEOUT_SEC).await;
+                    Timer::sleep(CUTOFF_TIMEOUT).await;
                     let last_sec = (last_response.load(AtomicOrdering::Relaxed) / 1000) as f64;
-                    if now_float() - last_sec > ELECTRUM_TIMEOUT_SEC {
+                    if now_float() - last_sec > CUTOFF_TIMEOUT {
                         break ElectrumConnectionErr::Temporary(format!(
                             "Server didn't respond for too long ({}s).",
                             now_float() - last_sec
@@ -630,7 +633,10 @@ impl ElectrumConnection {
             },
         };
 
-        let timeout = connection.settings.timeout_sec.unwrap_or(ELECTRUM_TIMEOUT_SEC);
+        let timeout = connection
+            .settings
+            .timeout_sec
+            .unwrap_or(DEFAULT_CONNECTION_ESTABLISHMENT_TIMEOUT);
         let now = Instant::now();
         let Ok(connect_f) = ws_transport(
             CONN_IDX.fetch_add(1, AtomicOrdering::Relaxed),
@@ -661,9 +667,9 @@ impl ElectrumConnection {
             let last_response = last_response.clone();
             async move {
                 loop {
-                    Timer::sleep(ELECTRUM_TIMEOUT_SEC).await;
+                    Timer::sleep(CUTOFF_TIMEOUT).await;
                     let last_sec = (last_response.load(AtomicOrdering::Relaxed) / 1000) as f64;
-                    if now_float() - last_sec > ELECTRUM_TIMEOUT_SEC {
+                    if now_float() - last_sec > CUTOFF_TIMEOUT {
                         break ElectrumConnectionErr::Temporary(format!(
                             "Server didn't respond for too long ({}s).",
                             now_float() - last_sec

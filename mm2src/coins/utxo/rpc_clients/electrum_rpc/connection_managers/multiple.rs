@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use super::super::client::{ElectrumClient, ElectrumClientImpl};
 use super::super::connection::{ElectrumConnection, ElectrumConnectionErr, ElectrumConnectionSettings};
-use super::super::constants::{PING_TIMEOUT_SEC, SUSPEND_TIME_INIT_SEC};
+use super::super::constants::{FIRST_SUSPEND_TIME, PING_INTERVAL};
 use super::{ConnectionManagerErr, ConnectionManagerTrait};
 
 use crate::utxo::rpc_clients::UtxoRpcClientOps;
@@ -61,7 +61,7 @@ impl ConnectionManagerMultiple {
             connections.insert(connection.address().to_string(), ConnectionContext {
                 connection: Arc::new(connection),
                 subs: Mutex::new(Vec::new()),
-                next_suspend_time: Mutex::new(SUSPEND_TIME_INIT_SEC),
+                next_suspend_time: Mutex::new(FIRST_SUSPEND_TIME),
             });
         }
 
@@ -140,7 +140,7 @@ impl ConnectionManagerTrait for Arc<ConnectionManagerMultiple> {
                         let Some(client) = manager.get_client() else { break };
                         // This will ping all the active connections, which will keep these connections alive.
                         client.server_ping().compat().await.ok();
-                        Timer::sleep(PING_TIMEOUT_SEC).await;
+                        Timer::sleep(PING_INTERVAL).await;
                     }
                 }
             };
@@ -254,7 +254,7 @@ impl ConnectionManagerTrait for Arc<ConnectionManagerMultiple> {
         };
 
         // Reset the suspend time.
-        *connection_ctx.next_suspend_time.lock().unwrap() = SUSPEND_TIME_INIT_SEC;
+        *connection_ctx.next_suspend_time.lock().unwrap() = FIRST_SUSPEND_TIME;
     }
 
     fn on_disconnected(&self, server_address: &str) {
