@@ -1,9 +1,10 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
-use std::sync::{Arc, Mutex, RwLock, Weak};
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock, Weak};
 
 use super::super::client::{ElectrumClient, ElectrumClientImpl};
 use super::super::connection::{ElectrumConnection, ElectrumConnectionErr, ElectrumConnectionSettings};
-use super::super::constants::{FIRST_SUSPEND_TIME, PING_INTERVAL};
+use super::super::constants::PING_INTERVAL;
+use super::connection_context::ConnectionContext;
 use super::{ConnectionManagerErr, ConnectionManagerTrait};
 
 use crate::utxo::rpc_clients::UtxoRpcClientOps;
@@ -16,21 +17,9 @@ use async_trait::async_trait;
 use futures::compat::Future01CompatExt;
 use gstuff::now_ms;
 
-/// A struct that encapsulates an Electrum connection and its information.
-#[derive(Debug)]
-struct ConnectionContext {
-    /// The electrum connection.
-    connection: Arc<ElectrumConnection>,
-    /// The list of addresses subscribed to the connection.
-    subs: Mutex<Vec<Address>>,
-    /// How long to suspend the server the next time it disconnects (in milliseconds).
-    next_suspend_time: Mutex<u64>,
-}
-
-/// you wanna have a force wake method to wake up suspended servers that were queried specifically
 #[derive(Debug)]
 pub struct ConnectionManagerMultiple {
-    /// A flag to spawn a ping loop task for each connection.
+    /// A flag to spawn a ping loop task for active connections.
     spawn_ping: bool,
     /// A map for server addresses to their corresponding connections.
     connections: HashMap<String, ConnectionContext>,
@@ -58,11 +47,7 @@ impl ConnectionManagerMultiple {
             })?;
 
             let connection = ElectrumConnection::new(connection_settings, subsystem);
-            connections.insert(connection.address().to_string(), ConnectionContext {
-                connection: Arc::new(connection),
-                subs: Mutex::new(Vec::new()),
-                next_suspend_time: Mutex::new(FIRST_SUSPEND_TIME),
-            });
+            connections.insert(connection.address().to_string(), ConnectionContext::new(connection));
         }
 
         Ok(Arc::new(ConnectionManagerMultiple {
@@ -72,8 +57,8 @@ impl ConnectionManagerMultiple {
         }))
     }
 
-    /// Upgrades and returns the weak client we have. If None is returned this means either the client
-    /// was never initialized (initialized will fix this), or the client was dropped, which in this case
+    /// Attempts to upgrades and return the weak client reference we hold. If None is returned this means either
+    /// the client was never initialized (initialized will fix this), or the client was dropped, which in this case
     /// the connection manager is no longer usable.
     fn get_client(&self) -> Option<ElectrumClient> {
         self.electrum_client
@@ -115,22 +100,8 @@ impl ConnectionManagerTrait for Arc<ConnectionManagerMultiple> {
         // Store the (weak) electrum client.
         *self.electrum_client.write().unwrap() = Some(weak_client);
 
-        let background_task = {
-            let manager = self.clone();
-            let electrum_client = ElectrumClient(electrum_client.clone());
-            async move {
-                // First, Connect to all servers.
-                for connection in manager.get_all_connections() {
-                    ElectrumConnection::establish_connection_loop(connection, electrum_client.clone())
-                        .await
-                        .ok();
-                }
-                // Then, watch for disconnections to reconnect them back after timeout.
-                watch_for_disconnections(manager).await;
-            }
-        };
         // Use the client's spawner to spawn the connection manager's background task.
-        electrum_client.weak_spawner().spawn(background_task);
+        electrum_client.weak_spawner().spawn(background_task(self.clone()));
 
         if self.spawn_ping {
             let ping_task = {
@@ -171,14 +142,18 @@ impl ConnectionManagerTrait for Arc<ConnectionManagerMultiple> {
             .get_connection(server_address)
             .ok_or_else(|| ConnectionManagerErr::UnknownAddress)?;
 
-        // Force connect the connection if it's not connected yet.
-        if !connection.is_connected().await {
-            if let Some(client) = self.get_client() {
-                ElectrumConnection::establish_connection_loop(connection.clone(), client)
-                    .await
-                    .map_err(ConnectionManagerErr::ConnectingError)?;
-            } else {
-                return Err(ConnectionManagerErr::NoClient);
+        // FIXME: force_connect should be a flag to this method.
+        let force_connect = true;
+        if force_connect {
+            // Force connect the connection if it's not connected yet.
+            if !connection.is_connected().await {
+                if let Some(client) = self.get_client() {
+                    ElectrumConnection::establish_connection_loop(connection.clone(), client)
+                        .await
+                        .map_err(ConnectionManagerErr::ConnectingError)?;
+                } else {
+                    return Err(ConnectionManagerErr::NoClient);
+                }
             }
         }
 
@@ -188,12 +163,9 @@ impl ConnectionManagerTrait for Arc<ConnectionManagerMultiple> {
     async fn is_connections_pool_empty(&self) -> bool {
         // Since we don't remove the connections, but just set them as irrecoverable, we need
         // to check if all the connections are irrecoverable/not usable.
-        let connections = self.get_all_connections();
-        for connection in connections {
-            match connection.last_error().await.map(|e| e.is_recoverable()) {
-                None => return false,       // Connection is usable.
-                Some(true) => return false, // Connection errored but recoverable.
-                Some(false) => continue,    // Connection no longer usable.
+        for connection in self.get_all_connections() {
+            if connection.usable().await {
+                return false;
             }
         }
         true
@@ -237,7 +209,7 @@ impl ConnectionManagerTrait for Arc<ConnectionManagerMultiple> {
                     .is_ok()
                 {
                     if let Some(connection_ctx) = self.connections.get(connection.address()) {
-                        connection_ctx.subs.lock().unwrap().push(address);
+                        connection_ctx.add_sub(address);
                         // This address has been registered to a connection, remove it from the list.
                         addresses.remove(&scripthash);
                         break;
@@ -253,37 +225,30 @@ impl ConnectionManagerTrait for Arc<ConnectionManagerMultiple> {
             return;
         };
 
-        // Reset the suspend time.
-        *connection_ctx.next_suspend_time.lock().unwrap() = FIRST_SUSPEND_TIME;
+        // Reset the suspend time & disconnection time.
+        connection_ctx.connected();
     }
 
     fn on_disconnected(&self, server_address: &str) {
-        // The max time to suspend a server, 12h.
-        const MAX_SUSPEND_TIME: u64 = 12 * 60 * 60;
         let Some(connection_ctx) = self.connections.get(server_address) else {
             warn!("No connection found for address: {server_address}");
             return;
         };
-        // Clear the subs from the disconnected connection.
-        let abandoned_subs = connection_ctx.subs.lock().unwrap().drain(..).collect();
-        // Double the suspend time.
-        let mut next_suspend_time = connection_ctx.next_suspend_time.lock().unwrap();
-        *next_suspend_time = (*next_suspend_time * 2).min(MAX_SUSPEND_TIME);
+        let abandoned_subs = connection_ctx.disconnected();
         // Re-subscribe the abandoned addresses using the client.
         if let Some(client) = self.get_client() {
-            client.subscribe_addresses(abandoned_subs).ok();
+            client.subscribe_addresses(abandoned_subs.into_iter().collect()).ok();
         };
     }
 
     /// Remove a connection from the connection manager by its address.
     // TODO(feat): Add the ability to add a connection during runtime.
     async fn remove_connection(&self, server_address: &str) -> Result<Arc<ElectrumConnection>, ConnectionManagerErr> {
-        let Some(connection_ctx) = self.connections.get(server_address) else {
-            return Err(ConnectionManagerErr::UnknownAddress);
-        };
+        let connection = self
+            .get_connection(server_address)
+            .ok_or_else(|| ConnectionManagerErr::UnknownAddress)?;
         // Make sure this connection is disconnected.
-        connection_ctx
-            .connection
+        connection
             // Note that setting the error as irrecoverable renders the connection unusable.
             // This is how we (virtually) remove the connection right now. We never delete the
             // connection though. This is done for now to avoid guarding the connection map with a mutex.
@@ -292,24 +257,17 @@ impl ConnectionManagerTrait for Arc<ConnectionManagerMultiple> {
             )))
             .await;
         // Run the on-disconnection hook.
-        self.on_disconnected(connection_ctx.connection.address());
-        Ok(connection_ctx.connection.clone())
+        self.on_disconnected(connection.address());
+        Ok(connection.clone())
     }
 }
 
-async fn watch_for_disconnections(manager: Arc<ConnectionManagerMultiple>) -> Option<()> {
-    // A set of addresses and the time when they should be woken up, sorted by the time to be woken up.
-    let mut wake_address_when = BTreeSet::new();
-    // A set of addresses that we queued to wake.
-    let mut addresses_to_wake = HashSet::new();
-
+async fn background_task(manager: Arc<ConnectionManagerMultiple>) {
     loop {
-        let now = now_ms();
-
+        let Some(client) = manager.get_client() else { return };
         // If no connection is active, just fire up all the connections we have, we shouldn't operate
         // with no connections at all.
         if manager.get_active_connections().await.is_empty() {
-            let client = manager.get_client()?;
             for connection in manager.get_all_connections() {
                 ElectrumConnection::establish_connection_loop(connection, client.clone())
                     .await
@@ -317,45 +275,17 @@ async fn watch_for_disconnections(manager: Arc<ConnectionManagerMultiple>) -> Op
             }
             continue;
         }
-
-        // Check for any new disconnections and keep track of them.
+        // Check for any disconnected connection that are due to being connected.
         for connection in manager.get_all_connections() {
-            let address = connection.address().to_string();
-            // Skip the connection if it's already in the wake list.
-            if addresses_to_wake.contains(&address) {
-                continue;
-            }
             if !connection.is_connected().await {
-                let Some(connection_ctx) = manager.connections.get(connection.address()) else {
-                    // This shouldn't happen, continue anyway.
-                    continue;
-                };
-                let suspend_until = now + *connection_ctx.next_suspend_time.lock().unwrap();
-                // Register the address on our waking list.
-                addresses_to_wake.insert(address.clone());
-                wake_address_when.insert((suspend_until, address));
+                let Some(connection_ctx) = manager.connections.get(connection.address()) else { continue };
+                // Try to connect the server if it's time to wake it up.
+                if now_ms() >= connection_ctx.suspend_until() {
+                    ElectrumConnection::establish_connection_loop(connection, client.clone())
+                        .await
+                        .ok();
+                }
             }
-        }
-
-        // Reconnect the servers that are due to be waken up.
-        let mut reconnected_addresses = HashSet::new();
-        let client = manager.get_client()?;
-        for (suspend_until, address) in wake_address_when.iter() {
-            if now >= *suspend_until * 1000 {
-                let connection = manager.get_connection(address)?;
-                ElectrumConnection::establish_connection_loop(connection, client.clone())
-                    .await
-                    .ok();
-                reconnected_addresses.insert((*suspend_until, address.clone()));
-            } else {
-                // We can break since the `suspend_until` is sorted ascendingly.
-                break;
-            }
-        }
-        for reconnected_address in reconnected_addresses {
-            // Remove the address from the wake list.
-            addresses_to_wake.remove(&reconnected_address.1);
-            wake_address_when.remove(&reconnected_address);
         }
         drop(client);
 

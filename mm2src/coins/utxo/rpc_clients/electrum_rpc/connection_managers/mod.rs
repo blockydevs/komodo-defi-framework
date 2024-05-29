@@ -8,8 +8,12 @@ use keys::Address;
 
 use async_trait::async_trait;
 
+mod connection_context;
 mod multiple;
+mod selective;
+
 pub use multiple::ConnectionManagerMultiple;
+pub use selective::ConnectionManagerSelective;
 
 /// Trait provides a common interface to get an `ElectrumConnection` from the `ElectrumClient` instance
 #[async_trait]

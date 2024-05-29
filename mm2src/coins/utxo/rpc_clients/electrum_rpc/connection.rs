@@ -45,6 +45,10 @@ cfg_native! {
 
 pub type JsonRpcPendingRequests = HashMap<JsonRpcId, async_oneshot::Sender<JsonRpcResponseEnum>>;
 
+// FIXME: We should disconnect here. Even if the connection wasn't yet connected
+// we sometimes would disconnect it. event handlers should manage to know that such
+// a connection was never connect. We need this so we can inform the connection manager
+// that a specific connection errored *while* trying to connect (this is currently never communicated).
 macro_rules! log_and_return {
     ($typ:tt, $err:expr, $addr:expr, $conn:expr) => {{
         let err = ElectrumConnectionErr::$typ(format!("{:?}", $err));
@@ -146,6 +150,10 @@ impl ElectrumConnection {
 
     pub fn address(&self) -> &str { &self.settings.url }
 
+    pub fn is_primary(&self) -> bool { matches!(self.settings.priority, Priority::Primary) }
+
+    pub fn is_secondary(&self) -> bool { matches!(self.settings.priority, Priority::Secondary) }
+
     fn weak_spawner(&self) -> WeakSpawner { self.abortable_system.weak_spawner() }
 
     pub async fn is_connected(&self) -> bool { self.tx.lock().await.is_some() }
@@ -161,6 +169,13 @@ impl ElectrumConnection {
     async fn clear_last_error(&self) { self.last_error.lock().await.take(); }
 
     pub async fn last_error(&self) -> Option<ElectrumConnectionErr> { self.last_error.lock().await.clone() }
+
+    /// Returns whether the connection is usable or not (irrecoverably disconnected).
+    ///
+    /// It is usable if:
+    ///     1- It is not errored.
+    ///     2- Has errored but the error is recoverable.
+    pub async fn usable(&self) -> bool { self.last_error().await.map(|le| le.is_recoverable()).unwrap_or(true) }
 
     /// Try to connect to the electrum server.
     ///
@@ -331,7 +346,7 @@ impl ElectrumConnection {
     ) -> Result<f32, ElectrumConnectionErr> {
         // Check why we errored the last time, don't try to reconnect if it was an irrecoverable error.
         if let Some(last_error) = connection.last_error().await {
-            if let ElectrumConnectionErr::Irrecoverable(_) = last_error {
+            if !last_error.is_recoverable() {
                 return Err(last_error);
             }
         }
@@ -424,76 +439,78 @@ impl ElectrumConnection {
             false => info!("Electrum client connected to {address}"),
         };
 
-        let last_response = Arc::new(AtomicU64::new(now_ms()));
-        let no_connection_timeout_f = {
-            let last_response = last_response.clone();
-            async move {
-                loop {
-                    Timer::sleep(CUTOFF_TIMEOUT).await;
-                    let last_sec = (last_response.load(AtomicOrdering::Relaxed) / 1000) as f64;
-                    if now_float() - last_sec > CUTOFF_TIMEOUT {
-                        break ElectrumConnectionErr::Temporary(format!(
-                            "Server didn't respond for too long ({}s).",
-                            now_float() - last_sec
-                        ));
-                    }
-                }
-            }
-        };
-        let mut no_connection_timeout_f = Box::pin(no_connection_timeout_f).fuse();
-
-        let (read, mut write) = tokio::io::split(stream);
-        let recv_f = {
-            let connection = connection.clone();
-            let event_handlers = event_handlers.clone();
-            async move {
-                let mut buffer = String::with_capacity(1024);
-                let mut buf_reader = BufReader::new(read);
-                loop {
-                    match buf_reader.read_line(&mut buffer).await {
-                        Ok(c) => {
-                            // FIXME: Why do we close the connection on EOF? Is that a signal from the server
-                            // that no more data will be sent over this connection?
-                            if c == 0 {
-                                break ElectrumConnectionErr::Temporary("EOF".to_string());
-                            }
-                        },
-                        // FIXME: Fine grain the possible errors here, some of them might be irrecoverable?
-                        Err(e) => {
-                            break ElectrumConnectionErr::Temporary(format!("Error on read {e:?}"));
-                        },
-                    };
-
-                    last_response.store(now_ms(), AtomicOrdering::Relaxed);
-                    connection
-                        .process_electrum_bulk_response(buffer.as_bytes(), &event_handlers)
-                        .await;
-                    buffer.clear();
-                }
-            }
-        };
-        let mut recv_f = Box::pin(recv_f).fuse();
-
-        let (tx, rx) = mpsc::channel(0);
-        let send_f = {
-            let address = address.clone();
-            let event_handlers = event_handlers.clone();
-            let mut rx = rx_to_stream(rx).compat();
-            async move {
-                while let Some(Ok(bytes)) = rx.next().await {
-                    if let Err(e) = write.write_all(&bytes).await {
-                        error!("Write error {e} to {address}");
-                    } else {
-                        event_handlers.on_outgoing_request(&bytes);
-                    }
-                }
-                ElectrumConnectionErr::Temporary("Sender disconnected".to_string())
-            }
-        };
-        let mut send_f = Box::pin(send_f).fuse();
-
-        // Start the connection loop on a weak spawner.
         let connection_loop = {
+            // Branch 1: Disconnect after not receiving responses for too long.
+            let last_response = Arc::new(AtomicU64::new(now_ms()));
+            let no_connection_timeout_f = {
+                let last_response = last_response.clone();
+                async move {
+                    loop {
+                        Timer::sleep(CUTOFF_TIMEOUT).await;
+                        let last_sec = (last_response.load(AtomicOrdering::Relaxed) / 1000) as f64;
+                        if now_float() - last_sec > CUTOFF_TIMEOUT {
+                            break ElectrumConnectionErr::Temporary(format!(
+                                "Server didn't respond for too long ({}s).",
+                                now_float() - last_sec
+                            ));
+                        }
+                    }
+                }
+            };
+            let mut no_connection_timeout_f = Box::pin(no_connection_timeout_f).fuse();
+
+            // Branch 2: Read incoming responses from the server.
+            let (read, mut write) = tokio::io::split(stream);
+            let recv_f = {
+                let connection = connection.clone();
+                let event_handlers = event_handlers.clone();
+                async move {
+                    let mut buffer = String::with_capacity(1024);
+                    let mut buf_reader = BufReader::new(read);
+                    loop {
+                        match buf_reader.read_line(&mut buffer).await {
+                            Ok(c) => {
+                                // FIXME: Why do we close the connection on EOF? Is that a signal from the server
+                                // that no more data will be sent over this connection?
+                                if c == 0 {
+                                    break ElectrumConnectionErr::Temporary("EOF".to_string());
+                                }
+                            },
+                            // FIXME: Fine grain the possible errors here, some of them might be irrecoverable?
+                            Err(e) => {
+                                break ElectrumConnectionErr::Temporary(format!("Error on read {e:?}"));
+                            },
+                        };
+
+                        last_response.store(now_ms(), AtomicOrdering::Relaxed);
+                        connection
+                            .process_electrum_bulk_response(buffer.as_bytes(), &event_handlers)
+                            .await;
+                        buffer.clear();
+                    }
+                }
+            };
+            let mut recv_f = Box::pin(recv_f).fuse();
+
+            // Branch 3: Send outgoing requests to the server.
+            let (tx, rx) = mpsc::channel(0);
+            let send_f = {
+                let address = address.clone();
+                let event_handlers = event_handlers.clone();
+                let mut rx = rx_to_stream(rx).compat();
+                async move {
+                    while let Some(Ok(bytes)) = rx.next().await {
+                        if let Err(e) = write.write_all(&bytes).await {
+                            error!("Write error {e} to {address}");
+                        } else {
+                            event_handlers.on_outgoing_request(&bytes);
+                        }
+                    }
+                    ElectrumConnectionErr::Temporary("Sender disconnected".to_string())
+                }
+            };
+            let mut send_f = Box::pin(send_f).fuse();
+
             let address = address.clone();
             let connection = connection.clone();
             let event_handlers = event_handlers.clone();
@@ -520,14 +537,22 @@ impl ElectrumConnection {
                 connection.disconnect(Some(err)).await;
             }
         };
+        // Start the connection loop on a weak spawner.
         connection.weak_spawner().spawn(connection_loop);
 
+        // FIXME: Don't disconnect, leave the connection loop to disconnect on it's own (corrupt the connection).
+        // easy fix is clearing the tx sender from connection will cause the connection loop
+        // to stop and also flag `is_connected` as false. let's call such a method
+        // `connection.cancel()` or something.
         let version = match client
+            // FIXME: This might call `establish_connection_loop` under the hood. An easy fix is to never force-connect
+            // any connection if it's for version checking.
             .server_version(&address, client.protocol_version())
             .compat()
             .timeout_secs(remaining_timeout)
             .await
         {
+            // FIXME: Rename to `trigger_disconnection_and_return_error`.
             Err(_) => disconnect_and_return_error!(
                 ElectrumConnectionErr::Temporary(format!(
                     "Timed out ({remaining_timeout}s) while querying electrum server version"
@@ -586,7 +611,7 @@ impl ElectrumConnection {
 
         // Check why we errored the last time, don't try to reconnect if it was an irrecoverable error.
         if let Some(last_error) = connection.last_error().await {
-            if let ElectrumConnectionErr::Irrecoverable(_) = last_error {
+            if !last_error.is_recoverable() {
                 return Err(last_error);
             }
         }

@@ -1,7 +1,7 @@
 use super::super::{BlockHashOrHeight, EstimateFeeMethod, EstimateFeeMode, SpentOutputInfo, UnspentInfo, UnspentMap,
                    UtxoJsonRpcClientInfo, UtxoRpcClientOps, UtxoRpcError, UtxoRpcFut};
 use super::connection::{ElectrumConnection, ElectrumConnectionSettings};
-use super::connection_managers::{ConnectionManagerMultiple, ConnectionManagerTrait};
+use super::connection_managers::{ConnectionManagerMultiple, ConnectionManagerSelective, ConnectionManagerTrait};
 use super::constants::{BLOCKCHAIN_HEADERS_SUB_ID, BLOCKCHAIN_SCRIPTHASH_SUB_ID, ELECTRUM_REQUEST_TIMEOUT};
 use super::electrum_script_hash;
 use super::event_handlers::{ElectrumConnectionManagerNotifier, ElectrumScriptHashNotificationBridge};
@@ -106,14 +106,11 @@ impl ElectrumClientImpl {
             .map_err(|err| ERRL!("Failed to create connection_manager abortable system: {}", err))?;
 
         let connection_manager: Box<dyn ConnectionManagerTrait> = match client_settings.connection_manager_policy {
-            ConnectionManagerPolicy::Selective => {
-                panic!("panic for now")
-                // Box::new(ConnectionManagerSelective::try_new_arc(
-                //     client_settings.servers,
-                //     client_settings.spawn_ping,
-                //     sub_abortable_system,
-                // )?)
-            },
+            ConnectionManagerPolicy::Selective => Box::new(ConnectionManagerSelective::try_new_arc(
+                client_settings.servers,
+                client_settings.spawn_ping,
+                sub_abortable_system,
+            )?),
             ConnectionManagerPolicy::Multiple => Box::new(ConnectionManagerMultiple::try_new_arc(
                 client_settings.servers,
                 client_settings.spawn_ping,
@@ -294,7 +291,7 @@ impl ElectrumClient {
 
     /// Sends a JSONRPC request to all the connected servers.
     ///
-    /// A client with `ConnectionManagerPolicy::Multiple` will send the request to active connected servers,
+    /// A client with `ConnectionManagerPolicy::Multiple` will send the request to all active connected servers,
     /// which are *all* the servers if non of them is erroring (timeout, version mismatch, etc).
     /// A client with `ConnectionManagerPolicy::Selective` will send the request to the currently selected active server.
     async fn electrum_request_multi(
@@ -341,8 +338,7 @@ impl ElectrumClient {
 
     /// Sends a JSONRPC request to a specific electrum server.
     ///
-    /// In `ConnectionManagerPolicy::Selective` mode, the server might not be active, in which case
-    /// the connection manager will try to establish a connection to it.
+    /// This will try to wake up the server connection if it's not connected.
     async fn electrum_request_to(
         self,
         to_addr: String,

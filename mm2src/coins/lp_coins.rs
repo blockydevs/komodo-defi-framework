@@ -3840,15 +3840,27 @@ impl<T: RpcTransportEventHandler> RpcTransportEventHandler for Vec<T> {
     }
 
     fn on_connected(&self, address: &str) -> Result<(), String> {
+        let mut errors = vec![];
         for handler in self {
-            try_s!(handler.on_connected(address))
+            if let Err(e) = handler.on_connected(address) {
+                errors.push(e)
+            }
+        }
+        if !errors.is_empty() {
+            return Err(errors.join(", "))
         }
         Ok(())
     }
 
     fn on_disconnected(&self, address: &str) -> Result<(), String> {
+        let mut errors = vec![];
         for handler in self {
-            try_s!(handler.on_disconnected(address))
+            if let Err(e) = handler.on_disconnected(address) {
+                errors.push(e)
+            }
+        }
+        if !errors.is_empty() {
+            return Err(errors.join(", "))
         }
         Ok(())
     }
