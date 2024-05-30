@@ -341,7 +341,7 @@ async fn background_task(manager: Arc<ConnectionManagerSelective>) {
             }
         }
 
-        panic!("no connection found");
+        //panic!("no connection found");
         println!("finished looking for a connection");
         if !manager.get_active_connections().await.is_empty() {
             // Since we are connected, wait for a disconnection notification
