@@ -183,19 +183,22 @@ impl ConnectionManagerTrait for Arc<ConnectionManagerSelective> {
     async fn get_connection_by_address(
         &self,
         server_address: &str,
+        force_connect: bool,
     ) -> Result<Arc<ElectrumConnection>, ConnectionManagerErr> {
         let connection = self
             .get_connection(server_address)
             .ok_or_else(|| ConnectionManagerErr::UnknownAddress)?;
 
-        // Force connect the connection if it's not connected yet.
-        if !connection.is_connected().await {
-            if let Some(client) = self.get_client() {
-                ElectrumConnection::establish_connection_loop(connection.clone(), client)
-                    .await
-                    .map_err(ConnectionManagerErr::ConnectingError)?;
-            } else {
-                return Err(ConnectionManagerErr::NoClient);
+        if force_connect {
+            // Force connect the connection if it's not connected yet.
+            if !connection.is_connected().await {
+                if let Some(client) = self.get_client() {
+                    ElectrumConnection::establish_connection_loop(connection.clone(), client)
+                        .await
+                        .map_err(ConnectionManagerErr::ConnectingError)?;
+                } else {
+                    return Err(ConnectionManagerErr::NoClient);
+                }
             }
         }
 

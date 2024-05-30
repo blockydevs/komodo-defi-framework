@@ -29,10 +29,15 @@ pub trait AbortableSystem: From<InnerShared<Self::Inner>> {
     /// Aborts all the spawned futures & subsystems if present, and resets the system
     /// to the initial state for further use.
     fn abort_all_and_reset(&self) -> Result<(), AbortedError> {
-        let inner_shared = self.__inner();
-        let mut inner = inner_shared.lock();
-        inner.abort_all()?;
-        *inner = Self::Inner::default();
+        let inner = self.__inner();
+        // FIXME: Imagine if the caller of this method `abort_all_and_reset` is already running inside this abortable system.
+        // In the call to `abort_all`, the system will be abort (or not yet since no await was called in between?), this means that
+        // setting `inner_locked` to default will never happen? right?
+        let mut inner_locked = inner.lock();
+        // FIXME: A fix to the above issue is to take out the content of `inner_locked` and defer dropping it until the end of the function.
+        // But let's try this out first and test if it works fine already (since no await was called in this method, it should run till completion).
+        inner_locked.abort_all()?;
+        *inner_locked = Self::Inner::default();
         Ok(())
     }
 

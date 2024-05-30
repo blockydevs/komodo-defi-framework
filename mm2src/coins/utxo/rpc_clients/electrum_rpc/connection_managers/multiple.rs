@@ -137,13 +137,12 @@ impl ConnectionManagerTrait for Arc<ConnectionManagerMultiple> {
     async fn get_connection_by_address(
         &self,
         server_address: &str,
+        force_connect: bool,
     ) -> Result<Arc<ElectrumConnection>, ConnectionManagerErr> {
         let connection = self
             .get_connection(server_address)
             .ok_or_else(|| ConnectionManagerErr::UnknownAddress)?;
 
-        // FIXME: force_connect should be a flag to this method.
-        let force_connect = true;
         if force_connect {
             // Force connect the connection if it's not connected yet.
             if !connection.is_connected().await {

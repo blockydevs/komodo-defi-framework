@@ -1,8 +1,8 @@
 use std::mem;
 use std::sync::{Arc, Mutex};
 
-use super::super::connection::{ElectrumConnection};
-use super::super::constants::{FIRST_SUSPEND_TIME};
+use super::super::connection::ElectrumConnection;
+use super::super::constants::FIRST_SUSPEND_TIME;
 
 use keys::Address;
 

@@ -37,6 +37,7 @@ pub trait ConnectionManagerTrait: Debug + Send + Sync {
     async fn get_connection_by_address(
         &self,
         server_address: &str,
+        force_connect: bool,
     ) -> Result<Arc<ElectrumConnection>, ConnectionManagerErr>;
 
     /// Returns a boolean value indicating whether the connections pool is empty (true)

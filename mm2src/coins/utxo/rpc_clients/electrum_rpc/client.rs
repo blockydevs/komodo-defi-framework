@@ -299,10 +299,7 @@ impl ElectrumClient {
         request: JsonRpcRequestEnum,
     ) -> Result<(JsonRpcRemoteAddr, JsonRpcResponseEnum), JsonRpcErrorType> {
         // Whether to send the request to all the connections or not.
-        let send_to_all = match request {
-            JsonRpcRequestEnum::Single(ref req) => req.method == "server.ping",
-            JsonRpcRequestEnum::Batch(_) => false,
-        };
+        let send_to_all = matches!(request, JsonRpcRequestEnum::Single(ref req) if req.method == "server.ping");
         // Request id and serialized request.
         let req_id = request.rpc_id();
         let request = json::to_string(&request).map_err(|e| JsonRpcErrorType::InvalidRequest(e.to_string()))?;
@@ -344,9 +341,12 @@ impl ElectrumClient {
         to_addr: String,
         request: JsonRpcRequestEnum,
     ) -> Result<JsonRpcResponseEnum, JsonRpcErrorType> {
+        // A server should already be connected if we are querying for its version.
+        let dont_force_connect =
+            matches!(request, JsonRpcRequestEnum::Single(ref req) if req.method == "server.version");
         let connection = self
             .connection_manager
-            .get_connection_by_address(&to_addr)
+            .get_connection_by_address(&to_addr, !dont_force_connect)
             .await
             .map_err(|err| JsonRpcErrorType::Internal(err.to_string()))?;
 

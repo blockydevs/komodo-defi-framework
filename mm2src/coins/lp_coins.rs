@@ -3843,11 +3843,11 @@ impl<T: RpcTransportEventHandler> RpcTransportEventHandler for Vec<T> {
         let mut errors = vec![];
         for handler in self {
             if let Err(e) = handler.on_connected(address) {
-                errors.push(e)
+                errors.push((handler.debug_info(), e))
             }
         }
         if !errors.is_empty() {
-            return Err(errors.join(", "))
+            return Err(format!("Errors: {:?}", errors));
         }
         Ok(())
     }
@@ -3856,11 +3856,11 @@ impl<T: RpcTransportEventHandler> RpcTransportEventHandler for Vec<T> {
         let mut errors = vec![];
         for handler in self {
             if let Err(e) = handler.on_disconnected(address) {
-                errors.push(e)
+                errors.push((handler.debug_info(), e))
             }
         }
         if !errors.is_empty() {
-            return Err(errors.join(", "))
+            return Err(format!("Errors: {:?}", errors));
         }
         Ok(())
     }
