@@ -87,7 +87,9 @@ pub fn electrum_client_for_test(servers: &[&str]) -> ElectrumClient {
 
     let servers = servers.into_iter().map(|s| json::from_value(s).unwrap()).collect();
     let abortable_system = AbortableQueue::default();
-    block_on(builder.electrum_client(abortable_system, args, servers, None)).unwrap()
+    let electrum_client = block_on(builder.electrum_client(abortable_system, args, servers, None)).unwrap();
+    electrum_client.wait_till_connected(5.);
+    electrum_client
 }
 
 /// Returned client won't work by default, requires some mocks to be usable

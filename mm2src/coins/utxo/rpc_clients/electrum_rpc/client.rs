@@ -202,6 +202,23 @@ impl ElectrumClientImpl {
     pub fn weak_spawner(&self) -> WeakSpawner { self.abortable_system.weak_spawner() }
 
     #[cfg(test)]
+    pub async fn wait_till_connected(&self, timeout: f32) {
+        use common::executor::Timer;
+        use instant::Instant;
+
+        let now = Instant::now();
+        loop {
+            if !self.connection_manager.get_active_connections().await.is_empty() {
+                break;
+            }
+            if now.elapsed().as_secs_f32() > timeout {
+                panic!("Timeout ({timeout}s) waiting for connection");
+            }
+            Timer::sleep(0.1).await;
+        }
+    }
+
+    #[cfg(test)]
     pub fn with_protocol_version(
         client_settings: ElectrumClientSettings,
         block_headers_storage: BlockHeaderStorage,
