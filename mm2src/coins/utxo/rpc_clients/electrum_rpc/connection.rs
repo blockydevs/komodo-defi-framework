@@ -188,6 +188,11 @@ impl ElectrumConnection {
 
     /// Disconnect and clear the connection state.
     pub async fn disconnect(&self, reason: Option<ElectrumConnectionErr>) {
+        println!(
+            "[disconnect hook] disconnecting from {} because of {:?}",
+            self.address(),
+            reason
+        );
         self.tx.lock().await.take();
         self.responses.lock().await.clear();
         self.clear_protocol_version().await;
@@ -522,7 +527,9 @@ impl ElectrumConnection {
             let connection = connection.clone();
             let event_handlers = event_handlers.clone();
             async move {
+                println!("connection loop started");
                 let already_connected = !connection.try_connect(tx).await;
+                println!("connection loop connected");
                 // Signal that the connection is up and ready.
                 connection_ready_signal.send(()).ok();
                 if already_connected {
@@ -553,13 +560,24 @@ impl ElectrumConnection {
 
         // Wait for the connection to be ready before querying the version.
         let now = Instant::now();
-        if wait_for_connection_ready.timeout_secs(timeout).await.is_err() {
-            disconnect_and_return!(
-                Temporary,
-                format!("Timed out ({timeout}s) while waiting for the connection to be ready"),
-                connection,
-                event_handlers
-            );
+        match wait_for_connection_ready.timeout_secs(timeout).await {
+            Ok(Ok(_)) => {},
+            Ok(Err(e)) => {
+                disconnect_and_return!(
+                    Temporary,
+                    format!("The thing canceled which isn't expected at all"),
+                    connection,
+                    event_handlers
+                );
+            },
+            Err(e) => {
+                disconnect_and_return!(
+                    Temporary,
+                    format!("Timed out ({timeout}s) while waiting for the connection to be ready"),
+                    connection,
+                    event_handlers
+                );
+            },
         }
         // This is the remaining timeout for version checking.
         let timeout = (timeout - now.elapsed().as_secs_f64()).max(0.0);
@@ -692,15 +710,15 @@ impl ElectrumConnection {
         .await else {
             disconnect_and_return!(
                 ElectrumConnectionErr::Timeout(timeout),
-                address,
-                connection
+                connection,
+                event_handlers,
             );
         };
         // We will use the remaining timeout for version checking.
         let timeout = (timeout - now.elapsed().as_secs_f64()).max(0.0);
 
         let (mut transport_tx, mut transport_rx) =
-            disconnect_and_return_if_err!(connect_f, Temporary, address, connection);
+            disconnect_and_return_if_err!(connect_f, Temporary, connection, event_handlers);
 
         match secure_connection {
             true => info!("Electrum client connected to {address} securely"),
@@ -831,21 +849,21 @@ impl ElectrumConnection {
             .timeout_secs(timeout)
             .await
         {
-            Err(_) => disconnect_and_return_error!(
+            Err(_) => disconnect_and_return!(
                 Temporary,
                 format!("Timed out ({timeout}s) while querying electrum server version"),
                 connection,
                 event_handlers
             ),
             Ok(response) => match response {
-                Err(e) => disconnect_and_return_error!(
+                Err(e) => disconnect_and_return!(
                     Temporary,
                     format!("Error querying electrum server version {e:?}"),
                     connection,
                     event_handlers
                 ),
                 Ok(version_str) => match version_str.protocol_version.parse::<f32>() {
-                    Err(e) => disconnect_and_return_error!(
+                    Err(e) => disconnect_and_return!(
                         // FIXME: Relax the error type here?
                         Irrecoverable,
                         format!("Failed to parse electrum server version {e:?}"),
@@ -856,7 +874,7 @@ impl ElectrumConnection {
                         if client.negotiate_version() {
                             let client_version_range = client.protocol_version();
                             if !client_version_range.contains(&version_f32) {
-                                disconnect_and_return_error!(
+                                disconnect_and_return!(
                                     ElectrumConnectionErr::VersionMismatch(client_version_range.clone(), version_f32),
                                     connection,
                                     event_handlers

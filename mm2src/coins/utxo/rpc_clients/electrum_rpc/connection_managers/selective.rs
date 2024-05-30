@@ -62,6 +62,7 @@ impl ConnectionManagerSelective {
         // Create a channel to be shared between the connection manager and its background task
         // to notify the background task that some active connection has disconnected.
         let (sender, receiver) = mpsc::channel::<()>(0);
+        Box::leak(Box::new(abortable_system));
         Ok(Arc::new(ConnectionManagerSelective {
             spawn_ping,
             active_address: Mutex::new(None),
@@ -168,11 +169,14 @@ impl ConnectionManagerTrait for Arc<ConnectionManagerSelective> {
             .as_ref()
             .and_then(|address| self.get_connection(address));
         if let Some(active_connection) = maybe_active_connection {
+            println!("Active connection (not sure if connected): {}", active_connection.address());
             if active_connection.is_connected().await {
+                println!("Active connection (connected): {}", active_connection.address());
                 // There is only one active connection at a time.
                 return vec![active_connection];
             }
         }
+        println!("No active connection found.");
         // We don't currently have an active connection.
         self.trigger_reconnection();
         vec![]
@@ -322,6 +326,7 @@ async fn background_task(manager: Arc<ConnectionManagerSelective>) {
         for connection in connections {
             let Some(connection_ctx) = manager.connections.get(connection.address()) else { continue };
             // Try to connect to the server if it's not suspended.
+            println!("now ms: {}, suspend until: {}", now_ms(), connection_ctx.suspend_until());
             if now_ms() >= connection_ctx.suspend_until() {
                 let address = connection.address().to_string();
                 if ElectrumConnection::establish_connection_loop(connection, client.clone())
@@ -329,16 +334,21 @@ async fn background_task(manager: Arc<ConnectionManagerSelective>) {
                     .is_ok()
                 {
                     // We are connected, mark the connection as active.
+                    println!("assigned active connection: {address}");
                     *manager.active_address.lock().unwrap() = Some(address);
                     break;
                 }
             }
         }
 
-        if manager.get_active_connections().await.is_empty() {
+        panic!("no connection found");
+        println!("finished looking for a connection");
+        if !manager.get_active_connections().await.is_empty() {
             // Since we are connected, wait for a disconnection notification
             // before we try connecting to another server.
+            println!("wait till disconnection");
             disconnection_notification.next().await;
+            println!("disconnected, looking for a new connection");
         }
     }
 }

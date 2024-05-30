@@ -24,7 +24,10 @@ pub trait AbortableSystem: From<InnerShared<Self::Inner>> {
 
     /// Aborts all spawned futures and subsystems if they present.
     /// The abortable system is considered not to be
-    fn abort_all(&self) -> Result<(), AbortedError> { self.__inner().lock().abort_all() }
+    fn abort_all(&self) -> Result<(), AbortedError> {
+        println!("abort_all von abortablesystem called, aber fur was?");
+        self.__inner().lock().abort_all()
+    }
 
     /// Aborts all the spawned futures & subsystems if present, and resets the system
     /// to the initial state for further use.

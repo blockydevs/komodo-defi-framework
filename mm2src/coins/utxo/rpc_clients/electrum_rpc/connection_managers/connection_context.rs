@@ -53,7 +53,7 @@ impl ConnectionContext {
 
     /// Returns the time the server should be suspended until (when to take it up) in milliseconds.
     pub(super) fn suspend_until(&self) -> u64 {
-        (*self.disconnected_at.lock().unwrap() + *self.next_suspend_time.lock().unwrap()) * 1000
+        *self.disconnected_at.lock().unwrap() + *self.next_suspend_time.lock().unwrap() * 1000
     }
 
     /// Adds a subscription to the connection context.

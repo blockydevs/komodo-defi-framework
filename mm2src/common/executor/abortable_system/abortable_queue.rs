@@ -68,16 +68,23 @@ impl WeakSpawner {
         F: Future03<Output = ()> + Send + 'static,
     {
         let (abort_tx, abort_rx) = oneshot::channel();
+        println!("trying to upgrade inner");
         let future_id = match self.inner.upgrade() {
             Some(inner_arc) => {
+                println!("upgraded inner");
                 let mut inner_guard = inner_arc.lock();
-                inner_guard.insert_handle(abort_tx)?
+                println!("locked inner");
+                inner_guard.insert_handle(abort_tx).map_err(|e| {
+                    println!("couldn't insert inner");
+                    e
+                })?
             },
             None => return Err(AbortedError),
         };
 
         let inner_weak = self.inner.clone();
 
+        println!("putting fut in aborable");
         let (abortable_fut, abort_handle) = abortable(fut);
 
         let final_fut = async move {
@@ -97,6 +104,7 @@ impl WeakSpawner {
             match select(abortable_fut.boxed(), wait_till_abort.boxed()).await {
                 // The future has finished normally.
                 Either::Left(_) => {
+                    println!("fut finished");
                     if let Some(on_finish) = settings.on_finish {
                         log::log!(on_finish.level, "{}", on_finish.msg);
                     }
@@ -108,6 +116,7 @@ impl WeakSpawner {
                 // `abort_tx` has been removed from `QueueInnerState::abort_handlers`,
                 // *and* the `critical_timeout_s` timeout has expired (if was specified).
                 Either::Right(_) => {
+                    println!("abort called");
                     if let Some(on_abort) = settings.on_abort {
                         log::log!(on_abort.level, "{}", on_abort.msg);
                     }
@@ -171,6 +180,7 @@ impl Default for QueueInnerState {
 impl QueueInnerState {
     /// Inserts the given future `handle`.
     fn insert_handle(&mut self, handle: oneshot::Sender<()>) -> Result<FutureId, AbortedError> {
+        println!("inserting handle {:?}", self);
         let (abort_handlers, finished_futures) = match self {
             QueueInnerState::Ready {
                 abort_handlers,
@@ -225,6 +235,8 @@ impl QueueInnerState {
 
 impl SystemInner for QueueInnerState {
     fn abort_all(&mut self) -> Result<(), AbortedError> {
+        println!("abort_all von queueinnerstate called, aber fur was?");
+
         if matches!(self, QueueInnerState::Aborted) {
             return Err(AbortedError);
         }
