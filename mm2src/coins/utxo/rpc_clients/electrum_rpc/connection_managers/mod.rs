@@ -4,9 +4,11 @@ use std::sync::{Arc, Weak};
 
 use super::client::ElectrumClientImpl;
 use super::connection::{ElectrumConnection, ElectrumConnectionErr};
+use common::executor::Timer;
 use keys::Address;
 
 use async_trait::async_trait;
+use instant::Instant;
 
 mod connection_context;
 mod multiple;
@@ -28,6 +30,23 @@ pub trait ConnectionManagerTrait: Debug + Send + Sync {
 
     /// Returns all the currently active connections.
     async fn get_active_connections(&self) -> Vec<Arc<ElectrumConnection>>;
+
+    /// Waits until the connection manager is connected to the electrum server.
+    async fn wait_till_connected(&self, timeout: f32) -> Result<(), String> {
+        let start_time = Instant::now();
+        loop {
+            if !self.get_active_connections().await.is_empty() {
+                return Ok(());
+            }
+            Timer::sleep(0.5).await;
+            if start_time.elapsed().as_secs_f32() > timeout {
+                return Err(format!(
+                    "Waited for {} seconds but the connection manager is still not connected",
+                    timeout
+                ));
+            }
+        }
+    }
 
     /// Returns all the server addresses.
     fn get_all_server_addresses(&self) -> Vec<String>;

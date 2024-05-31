@@ -13,10 +13,11 @@ use crate::utxo::{output_script, GetBlockHeaderError, GetConfirmedTxError, GetTx
 use crate::SharableRpcTransportEventHandler;
 use chain::{BlockHeader, OutPoint, Transaction as UtxoTx, TxHashAlgo};
 use common::custom_iter::CollectInto;
-use common::executor::{abortable_queue::AbortableQueue, abortable_queue::WeakSpawner, AbortableSystem};
+use common::executor::abortable_queue::{AbortableQueue, WeakSpawner};
 use common::jsonrpc_client::{JsonRpcBatchClient, JsonRpcClient, JsonRpcError, JsonRpcErrorType, JsonRpcMultiClient,
                              JsonRpcRemoteAddr, JsonRpcRequest, JsonRpcRequestEnum, JsonRpcResponseEnum,
                              JsonRpcResponseFut, RpcRes};
+use common::log::error;
 use common::{median, OrdRange};
 use keys::hash::H256;
 use keys::Address;
@@ -281,6 +282,15 @@ impl ElectrumClient {
             event_handlers,
             scripthash_notification_sender,
         )?);
+
+        // Wait till we have some connection(s) available.
+        client
+            .connection_manager
+            .wait_till_connected(5.)
+            .await
+            // Connections might be temporarily unavailable, so we don't want to fail the client creation.
+            .map_err(|e| error!("{:?}", e))
+            .ok();
 
         Ok(client)
     }
