@@ -336,12 +336,11 @@ impl ElectrumConnection {
     ///
     /// This will first try to connect to the server and use that connection to query its version.
     /// If version checks succeed, the connection will be kept alive, otherwise, it will be dropped.
-    /// Returns either the version of the server, or an [`ElectrumConnectionErr`].
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn establish_connection_loop(
         connection: Arc<ElectrumConnection>,
         client: ElectrumClient,
-    ) -> Result<f32, ElectrumConnectionErr> {
+    ) -> Result<(), ElectrumConnectionErr> {
         // Check why we errored the last time, don't try to reconnect if it was an irrecoverable error.
         if let Some(last_error) = connection.last_error().await {
             if !last_error.is_recoverable() {
@@ -527,11 +526,9 @@ impl ElectrumConnection {
             let connection = connection.clone();
             let event_handlers = event_handlers.clone();
             async move {
-                println!("connection loop started");
                 let already_connected = !connection.try_connect(tx).await;
-                println!("connection loop connected");
                 // Signal that the connection is up and ready.
-                connection_ready_signal.send(()).ok();
+                connection_ready_signal.send(already_connected).ok();
                 if already_connected {
                     // Gracefully return if some other thread is already connected using `connection`.
                     // Up until this point, we didn't alter `connection` in any way.
@@ -561,11 +558,15 @@ impl ElectrumConnection {
         // Wait for the connection to be ready before querying the version.
         let now = Instant::now();
         match wait_for_connection_ready.timeout_secs(timeout).await {
-            Ok(Ok(_)) => {},
+            // The connection is already connected. Don't query for the version because Electrum doesn't
+            // like when a client queries for the version multiple times.
+            Ok(Ok(true)) => return Ok(()),
+            // We just connected, need to query for the server version, continue.
+            Ok(Ok(false)) => {},
             Ok(Err(e)) => {
                 disconnect_and_return!(
                     Temporary,
-                    format!("The thing canceled which isn't expected at all"),
+                    format!("Connection ready signal was dropped, weak spawner failed to spawn the connection loop"),
                     connection,
                     event_handlers
                 );
@@ -582,52 +583,36 @@ impl ElectrumConnection {
         // This is the remaining timeout for version checking.
         let timeout = (timeout - now.elapsed().as_secs_f64()).max(0.0);
 
-        let version = match client
+        let version_query_error = match client
             .server_version(&address, client.protocol_version())
             .compat()
             .timeout_secs(timeout)
             .await
         {
-            Err(_) => disconnect_and_return!(
-                Temporary,
-                format!("Timed out ({timeout}s) while querying electrum server version"),
-                connection,
-                event_handlers
-            ),
             Ok(response) => match response {
-                Err(e) => disconnect_and_return!(
-                    Temporary,
-                    format!("Error querying electrum server version {e:?}"),
-                    connection,
-                    event_handlers
-                ),
                 Ok(version_str) => match version_str.protocol_version.parse::<f32>() {
-                    Err(e) => disconnect_and_return!(
-                        // FIXME: Relax the error type here?
-                        Irrecoverable,
-                        format!("Failed to parse electrum server version {e:?}"),
-                        connection,
-                        event_handlers
-                    ),
                     Ok(version_f32) => {
-                        if client.negotiate_version() {
-                            let client_version_range = client.protocol_version();
-                            if !client_version_range.contains(&version_f32) {
-                                disconnect_and_return!(
-                                    ElectrumConnectionErr::VersionMismatch(client_version_range.clone(), version_f32),
-                                    connection,
-                                    event_handlers
-                                )
-                            }
+                        // If no version negotiation is needed or the server's version is in the accepted version range,
+                        // set the protocol version and return successfully.
+                        if !client.negotiate_version() || client.protocol_version().contains(&version_f32) {
+                            connection.set_protocol_version(version_f32).await;
+                            return Ok(());
                         }
-                        version_f32
+                        ElectrumConnectionErr::VersionMismatch(client.protocol_version().clone(), version_f32)
+                    },
+                    Err(e) => {
+                        // FIXME: Relax the error type here?
+                        ElectrumConnectionErr::Irrecoverable(format!("Failed to parse electrum server version {e:?}"))
                     },
                 },
+                Err(e) => ElectrumConnectionErr::Temporary(format!("Error querying electrum server version {e:?}")),
             },
+            Err(_) => ElectrumConnectionErr::Temporary(format!(
+                "Timed out ({timeout}s) while querying electrum server version"
+            )),
         };
 
-        connection.set_protocol_version(version).await;
-        Ok(version)
+        disconnect_and_return!(version_query_error, connection, event_handlers);
     }
 
     #[cfg(target_arch = "wasm32")]
