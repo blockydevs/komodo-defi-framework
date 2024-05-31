@@ -188,11 +188,6 @@ impl ElectrumConnection {
 
     /// Disconnect and clear the connection state.
     pub async fn disconnect(&self, reason: Option<ElectrumConnectionErr>) {
-        println!(
-            "[disconnect hook] disconnecting from {} because of {:?}",
-            self.address(),
-            reason
-        );
         self.tx.lock().await.take();
         self.responses.lock().await.clear();
         self.clear_protocol_version().await;
