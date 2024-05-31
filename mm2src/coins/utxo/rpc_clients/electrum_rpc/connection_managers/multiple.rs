@@ -34,7 +34,7 @@ impl ConnectionManagerMultiple {
     pub fn try_new_arc(
         servers: Vec<ElectrumConnectionSettings>,
         spawn_ping: bool,
-        abortable_system: AbortableQueue,
+        abortable_system: &AbortableQueue,
     ) -> Result<Arc<Self>, String> {
         let mut connections = HashMap::with_capacity(servers.len());
         for connection_settings in servers {

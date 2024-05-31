@@ -43,7 +43,7 @@ impl ConnectionManagerSelective {
     pub fn try_new_arc(
         servers: Vec<ElectrumConnectionSettings>,
         spawn_ping: bool,
-        abortable_system: AbortableQueue,
+        abortable_system: &AbortableQueue,
     ) -> Result<Arc<Self>, String> {
         let mut connections = HashMap::with_capacity(servers.len());
         for connection_settings in servers {
@@ -62,7 +62,7 @@ impl ConnectionManagerSelective {
         // Create a channel to be shared between the connection manager and its background task
         // to notify the background task that some active connection has disconnected.
         let (sender, receiver) = mpsc::channel::<()>(0);
-        Box::leak(Box::new(abortable_system));
+
         Ok(Arc::new(ConnectionManagerSelective {
             spawn_ping,
             active_address: Mutex::new(None),

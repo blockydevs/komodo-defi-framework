@@ -101,20 +101,16 @@ impl ElectrumClientImpl {
             }));
         }
 
-        let sub_abortable_system = abortable_system
-            .create_subsystem()
-            .map_err(|err| ERRL!("Failed to create connection_manager abortable system: {}", err))?;
-
         let connection_manager: Box<dyn ConnectionManagerTrait> = match client_settings.connection_manager_policy {
             ConnectionManagerPolicy::Selective => Box::new(ConnectionManagerSelective::try_new_arc(
                 client_settings.servers,
                 client_settings.spawn_ping,
-                sub_abortable_system,
+                &abortable_system,
             )?),
             ConnectionManagerPolicy::Multiple => Box::new(ConnectionManagerMultiple::try_new_arc(
                 client_settings.servers,
                 client_settings.spawn_ping,
-                sub_abortable_system,
+                &abortable_system,
             )?),
         };
 
@@ -200,23 +196,6 @@ impl ElectrumClientImpl {
     pub fn block_headers_storage(&self) -> &BlockHeaderStorage { &self.block_headers_storage }
 
     pub fn weak_spawner(&self) -> WeakSpawner { self.abortable_system.weak_spawner() }
-
-    #[cfg(test)]
-    pub async fn wait_till_connected(&self, timeout: f32) {
-        use common::executor::Timer;
-        use instant::Instant;
-
-        let now = Instant::now();
-        loop {
-            if !self.connection_manager.get_active_connections().await.is_empty() {
-                break;
-            }
-            if now.elapsed().as_secs_f32() > timeout {
-                panic!("Timeout ({timeout}s) waiting for connection");
-            }
-            Timer::sleep(0.1).await;
-        }
-    }
 
     #[cfg(test)]
     pub fn with_protocol_version(
