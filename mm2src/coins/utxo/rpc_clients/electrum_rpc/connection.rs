@@ -521,10 +521,10 @@ impl ElectrumConnection {
             let connection = connection.clone();
             let event_handlers = event_handlers.clone();
             async move {
-                let already_connected = !connection.try_connect(tx).await;
+                let was_already_connected = !connection.try_connect(tx).await;
                 // Signal that the connection is up and ready.
-                connection_ready_signal.send(already_connected).ok();
-                if already_connected {
+                connection_ready_signal.send(was_already_connected).ok();
+                if was_already_connected {
                     // Gracefully return if some other thread is already connected using `connection`.
                     // Up until this point, we didn't alter `connection` in any way.
                     // Note that the other active connection is the one which will reply to the version querying
@@ -558,7 +558,7 @@ impl ElectrumConnection {
             Ok(Ok(true)) => return Ok(()),
             // We just connected, need to query for the server version, continue.
             Ok(Ok(false)) => {},
-            Ok(Err(e)) => {
+            Ok(Err(_)) => {
                 disconnect_and_return!(
                     Temporary,
                     format!("Connection ready signal was dropped, weak spawner failed to spawn the connection loop"),
@@ -566,7 +566,7 @@ impl ElectrumConnection {
                     event_handlers
                 );
             },
-            Err(e) => {
+            Err(_) => {
                 disconnect_and_return!(
                     Temporary,
                     format!("Timed out ({timeout}s) while waiting for the connection to be ready"),
@@ -614,11 +614,10 @@ impl ElectrumConnection {
     pub async fn establish_connection_loop(
         connection: Arc<ElectrumConnection>,
         client: ElectrumClient,
-    ) -> Result<f32, ElectrumConnectionErr> {
+    ) -> Result<(), ElectrumConnectionErr> {
         use mm2_net::wasm::wasm_ws::ws_transport;
         use std::sync::atomic::AtomicUsize;
 
-        use super::event_handlers;
         lazy_static! {
             static ref CONN_IDX: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
         }
@@ -691,7 +690,7 @@ impl ElectrumConnection {
             disconnect_and_return!(
                 ElectrumConnectionErr::Timeout(timeout),
                 connection,
-                event_handlers,
+                event_handlers
             );
         };
         // We will use the remaining timeout for version checking.
@@ -782,10 +781,10 @@ impl ElectrumConnection {
             let connection = connection.clone();
             let event_handlers = event_handlers.clone();
             async move {
-                let already_connected = !connection.try_connect(tx).await;
+                let was_already_connected = !connection.try_connect(tx).await;
                 // Signal that the connection is up and ready.
-                connection_ready_signal.send(()).ok();
-                if already_connected {
+                connection_ready_signal.send(was_already_connected).ok();
+                if was_already_connected {
                     // Gracefully return if some other thread is already connected using `connection`.
                     // Up until this point, we didn't alter `connection` in any way.
                     // Note that the other active connection is the one which will reply to the version querying
@@ -812,62 +811,61 @@ impl ElectrumConnection {
 
         // Wait for the connection to be ready before querying the version.
         let now = Instant::now();
-        if wait_for_connection_ready.timeout_secs(timeout).await.is_err() {
-            disconnect_and_return!(
-                Temporary,
-                format!("Timed out ({timeout}s) while waiting for the connection to be ready"),
-                connection,
-                event_handlers
-            );
+        match wait_for_connection_ready.timeout_secs(timeout).await {
+            // The connection is already connected. Don't query for the version because Electrum doesn't
+            // like when a client queries for the version multiple times.
+            Ok(Ok(true)) => return Ok(()),
+            // We just connected, need to query for the server version, continue.
+            Ok(Ok(false)) => {},
+            Ok(Err(_)) => {
+                disconnect_and_return!(
+                    Temporary,
+                    format!("Connection ready signal was dropped, weak spawner failed to spawn the connection loop"),
+                    connection,
+                    event_handlers
+                );
+            },
+            Err(_) => {
+                disconnect_and_return!(
+                    Temporary,
+                    format!("Timed out ({timeout}s) while waiting for the connection to be ready"),
+                    connection,
+                    event_handlers
+                );
+            },
         }
         // This is the remaining timeout for version checking.
         let timeout = (timeout - now.elapsed().as_secs_f64()).max(0.0);
 
-        let version = match client
+        let version_query_error = match client
             .server_version(&address, client.protocol_version())
             .compat()
             .timeout_secs(timeout)
             .await
         {
-            Err(_) => disconnect_and_return!(
-                Temporary,
-                format!("Timed out ({timeout}s) while querying electrum server version"),
-                connection,
-                event_handlers
-            ),
             Ok(response) => match response {
-                Err(e) => disconnect_and_return!(
-                    Temporary,
-                    format!("Error querying electrum server version {e:?}"),
-                    connection,
-                    event_handlers
-                ),
                 Ok(version_str) => match version_str.protocol_version.parse::<f32>() {
-                    Err(e) => disconnect_and_return!(
-                        // FIXME: Relax the error type here?
-                        Irrecoverable,
-                        format!("Failed to parse electrum server version {e:?}"),
-                        connection,
-                        event_handlers
-                    ),
                     Ok(version_f32) => {
-                        if client.negotiate_version() {
-                            let client_version_range = client.protocol_version();
-                            if !client_version_range.contains(&version_f32) {
-                                disconnect_and_return!(
-                                    ElectrumConnectionErr::VersionMismatch(client_version_range.clone(), version_f32),
-                                    connection,
-                                    event_handlers
-                                )
-                            }
+                        // If no version negotiation is needed or the server's version is in the accepted version range,
+                        // set the protocol version and return successfully.
+                        if !client.negotiate_version() || client.protocol_version().contains(&version_f32) {
+                            connection.set_protocol_version(version_f32).await;
+                            return Ok(());
                         }
-                        version_f32
+                        ElectrumConnectionErr::VersionMismatch(client.protocol_version().clone(), version_f32)
+                    },
+                    Err(e) => {
+                        // FIXME: Relax the error type here?
+                        ElectrumConnectionErr::Irrecoverable(format!("Failed to parse electrum server version {e:?}"))
                     },
                 },
+                Err(e) => ElectrumConnectionErr::Temporary(format!("Error querying electrum server version {e:?}")),
             },
+            Err(_) => ElectrumConnectionErr::Temporary(format!(
+                "Timed out ({timeout}s) while querying electrum server version"
+            )),
         };
 
-        connection.set_protocol_version(version).await;
-        Ok(version)
+        disconnect_and_return!(version_query_error, connection, event_handlers);
     }
 }
