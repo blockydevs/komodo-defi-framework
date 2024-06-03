@@ -23,12 +23,6 @@ pub(crate) struct EnableRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     fallback_swap_contract: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    gas_station_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    gas_station_decimals: Option<u8>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    gas_station_policy: Option<GasStationPricePolicy>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     mm2: Option<u8>,
     #[serde(default)]
     tx_history: bool,

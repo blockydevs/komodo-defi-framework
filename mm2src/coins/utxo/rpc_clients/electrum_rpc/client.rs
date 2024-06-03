@@ -9,10 +9,10 @@ use super::rpc_responses::*;
 
 use crate::utxo::rpc_clients::ConcurrentRequestMap;
 use crate::utxo::utxo_block_header_storage::BlockHeaderStorage;
-use crate::utxo::{output_script, GetBlockHeaderError, GetConfirmedTxError, GetTxHeightError, ScripthashNotification};
+use crate::utxo::{output_script, output_script_p2pk, GetBlockHeaderError, GetConfirmedTxError, GetTxHeightError,
+                  ScripthashNotification};
 use crate::SharableRpcTransportEventHandler;
-use chain::{BlockHeader, OutPoint, Transaction as UtxoTx, TxHashAlgo};
-use common::custom_iter::CollectInto;
+use chain::{BlockHeader, Transaction as UtxoTx, TxHashAlgo};
 use common::executor::abortable_queue::{AbortableQueue, WeakSpawner};
 use common::jsonrpc_client::{JsonRpcBatchClient, JsonRpcClient, JsonRpcError, JsonRpcErrorType, JsonRpcMultiClient,
                              JsonRpcRemoteAddr, JsonRpcRequest, JsonRpcRequestEnum, JsonRpcResponseEnum,
@@ -713,53 +713,72 @@ impl ElectrumClient {
     }
 }
 
-// If mockable is placed before async_trait there is `munmap_chunk(): invalid pointer` error on async fn mocking attempt
+// if mockable is placed before async_trait there is `munmap_chunk(): invalid pointer` error on async fn mocking attempt
 #[async_trait]
 #[cfg_attr(test, mockable)]
 impl UtxoRpcClientOps for ElectrumClient {
     fn list_unspent(&self, address: &Address, _decimals: u8) -> UtxoRpcFut<Vec<UnspentInfo>> {
-        let script = try_f!(output_script(address));
-        let script_hash = electrum_script_hash(&script);
-        Box::new(
-            self.scripthash_list_unspent(&hex::encode(script_hash))
-                .map_to_mm_fut(UtxoRpcError::from)
-                .map(move |unspents| {
+        let mut output_scripts = vec![try_f!(output_script(address))];
+
+        // If the plain pubkey is available, fetch the UTXOs found in P2PK outputs as well (if any).
+        if let Some(pubkey) = address.pubkey() {
+            let p2pk_output_script = output_script_p2pk(pubkey);
+            output_scripts.push(p2pk_output_script);
+        }
+
+        let this = self.clone();
+        let fut = async move {
+            let hashes = output_scripts
+                .iter()
+                .map(|s| hex::encode(electrum_script_hash(s)))
+                .collect();
+            let unspents = this.scripthash_list_unspent_batch(hashes).compat().await?;
+
+            let unspents = unspents
+                .into_iter()
+                .zip(output_scripts)
+                .flat_map(|(unspents, output_script)| {
                     unspents
-                        .iter()
-                        .map(|unspent| UnspentInfo {
-                            outpoint: OutPoint {
-                                hash: unspent.tx_hash.reversed().into(),
-                                index: unspent.tx_pos,
-                            },
-                            value: unspent.value,
-                            height: unspent.height,
-                        })
-                        .collect()
-                }),
-        )
+                        .into_iter()
+                        .map(move |unspent| UnspentInfo::from_electrum(unspent, output_script.clone()))
+                })
+                .collect();
+            Ok(unspents)
+        };
+
+        Box::new(fut.boxed().compat())
     }
 
     fn list_unspent_group(&self, addresses: Vec<Address>, _decimals: u8) -> UtxoRpcFut<UnspentMap> {
-        let script_hashes = try_f!(addresses
+        let output_scripts = try_f!(addresses
             .iter()
-            .map(|addr| {
-                let script = output_script(addr)?;
-                let script_hash = electrum_script_hash(&script);
-                Ok(hex::encode(script_hash))
-            })
+            .map(output_script)
             .collect::<Result<Vec<_>, keys::Error>>());
 
         let this = self.clone();
         let fut = async move {
-            let unspents = this.scripthash_list_unspent_batch(script_hashes).compat().await?;
+            let hashes = output_scripts
+                .iter()
+                .map(|s| hex::encode(electrum_script_hash(s)))
+                .collect();
+            let unspents = this.scripthash_list_unspent_batch(hashes).compat().await?;
+
+            let unspents: Vec<Vec<UnspentInfo>> = unspents
+                .into_iter()
+                .zip(output_scripts)
+                .map(|(unspents, output_script)| {
+                    unspents
+                        .into_iter()
+                        .map(|unspent| UnspentInfo::from_electrum(unspent, output_script.clone()))
+                        .collect()
+                })
+                .collect();
 
             let unspent_map = addresses
                 .into_iter()
                 // `scripthash_list_unspent_batch` returns `ScriptHashUnspents` elements in the same order in which they were requested.
                 // So we can zip `addresses` and `unspents` into one iterator.
                 .zip(unspents)
-                // Map `(Address, Vec<ElectrumUnspent>)` pairs into `(Address, Vec<UnspentInfo>)`.
-                .map(|(address, electrum_unspents)| (address, electrum_unspents.collect_into()))
                 .collect();
             Ok(unspent_map)
         };
@@ -830,12 +849,26 @@ impl UtxoRpcClientOps for ElectrumClient {
             rpc_req!(self, "blockchain.scripthash.get_balance").into(),
             JsonRpcErrorType::Internal(err.to_string())
         )));
-        let hash = electrum_script_hash(&output_script);
-        let hash_str = hex::encode(hash);
-        Box::new(
-            self.scripthash_get_balance(&hash_str)
-                .map(move |electrum_balance| electrum_balance.to_big_decimal(decimals)),
-        )
+        let mut hashes = vec![hex::encode(electrum_script_hash(&output_script))];
+
+        // If the plain pubkey is available, fetch the balance found in P2PK output as well (if any).
+        if let Some(pubkey) = address.pubkey() {
+            let p2pk_output_script = output_script_p2pk(pubkey);
+            hashes.push(hex::encode(electrum_script_hash(&p2pk_output_script)));
+        }
+
+        let this = self.clone();
+        let fut = async move {
+            Ok(this
+                .scripthash_get_balances(hashes)
+                .compat()
+                .await?
+                .into_iter()
+                .fold(BigDecimal::from(0), |sum, electrum_balance| {
+                    sum + electrum_balance.to_big_decimal(decimals)
+                }))
+        };
+        Box::new(fut.boxed().compat())
     }
 
     fn display_balances(&self, addresses: Vec<Address>, decimals: u8) -> UtxoRpcFut<Vec<(Address, BigDecimal)>> {

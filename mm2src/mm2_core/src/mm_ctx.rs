@@ -21,6 +21,7 @@ use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
 use super::ConnectionManagerPolicy;
+use crate::data_asker::DataAsker;
 
 cfg_wasm32! {
     use mm2_rpc::wasm_rpc::WasmRpcSender;
@@ -31,12 +32,11 @@ cfg_native! {
     use db_common::async_sql_conn::AsyncConnection;
     use db_common::sqlite::rusqlite::Connection;
     use futures::lock::Mutex as AsyncMutex;
-    use futures_rustls::webpki::DNSNameRef;
+    use rustls::ServerName;
     use mm2_metrics::prometheus;
     use mm2_metrics::MmMetricsError;
     use std::net::{IpAddr, SocketAddr, AddrParseError};
     use std::path::{Path, PathBuf};
-    use std::str::FromStr;
     use std::sync::MutexGuard;
 }
 
@@ -79,6 +79,8 @@ pub struct MmCtx {
     pub rpc_started: Constructible<bool>,
     /// Controller for continuously streaming data using streaming channels of `mm2_event_stream`.
     pub stream_channel_controller: Controller<Event>,
+    /// Data transfer bridge between server and client where server (which is the mm2 runtime) initiates the request.
+    pub(crate) data_asker: DataAsker,
     /// Configuration of event streaming used for SSE.
     pub event_stream_configuration: Option<EventStreamConfiguration>,
     /// True if the MarketMaker instance needs to stop.
@@ -111,6 +113,11 @@ pub struct MmCtx {
     pub swaps_ctx: Mutex<Option<Arc<dyn Any + 'static + Send + Sync>>>,
     /// The context belonging to the `lp_stats` mod: `StatsContext`
     pub stats_ctx: Mutex<Option<Arc<dyn Any + 'static + Send + Sync>>>,
+    /// Wallet name for this mm2 instance. Optional for backwards compatibility.
+    pub wallet_name: Constructible<Option<String>>,
+    /// The context belonging to the `lp_wallet` mod: `WalletsContext`.
+    #[cfg(target_arch = "wasm32")]
+    pub wallets_ctx: Mutex<Option<Arc<dyn Any + 'static + Send + Sync>>>,
     /// The RPC sender forwarding requests to writing part of underlying stream.
     #[cfg(target_arch = "wasm32")]
     pub wasm_rpc: Constructible<WasmRpcSender>,
@@ -148,6 +155,7 @@ impl MmCtx {
             initialized: Constructible::default(),
             rpc_started: Constructible::default(),
             stream_channel_controller: Controller::new(),
+            data_asker: DataAsker::default(),
             event_stream_configuration: None,
             stop: Constructible::default(),
             ffi_handle: Constructible::default(),
@@ -167,6 +175,9 @@ impl MmCtx {
             coins_needed_for_kick_start: Mutex::new(HashSet::new()),
             swaps_ctx: Mutex::new(None),
             stats_ctx: Mutex::new(None),
+            wallet_name: Constructible::default(),
+            #[cfg(target_arch = "wasm32")]
+            wallets_ctx: Mutex::new(None),
             #[cfg(target_arch = "wasm32")]
             wasm_rpc: Constructible::default(),
             #[cfg(not(target_arch = "wasm32"))]
@@ -243,23 +254,22 @@ impl MmCtx {
     pub fn alt_names(&self) -> Result<Vec<String>, String> {
         // Helper function to validate `alt_names` entries
         fn validate_alt_name(name: &str) -> Result<(), String> {
-            // Check if it is a valid IP address
-            if let Ok(ip) = IpAddr::from_str(name) {
-                if ip.is_unspecified() {
-                    return ERR!("IP address {} must be specified", ip);
-                }
-                return Ok(());
+            match ServerName::try_from(name) {
+                Ok(ServerName::IpAddress(ip)) => {
+                    if ip.is_unspecified() {
+                        return ERR!("IP address {} must be specified", ip);
+                    }
+                    Ok(())
+                },
+                Ok(ServerName::DnsName(_)) => Ok(()),
+                // NOTE: We need to have this wild card since `ServerName` is a non_exhaustive enum.
+                Ok(_) => ERR!("Only IpAddress and DnsName are allowed in `alt_names`"),
+                Err(e) => ERR!(
+                    "`alt_names` contains {} which is not a valid IP address or DNS name: {}",
+                    name,
+                    e
+                ),
             }
-
-            // Check if it is a valid DNS name
-            if DNSNameRef::try_from_ascii_str(name).is_ok() {
-                return Ok(());
-            }
-
-            ERR!(
-                "`alt_names` contains {} which is neither a valid IP address nor a valid DNS name",
-                name
-            )
         }
 
         if self.conf["alt_names"].is_null() {
@@ -278,6 +288,12 @@ impl MmCtx {
                 }
                 Ok(names)
             })
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn wallet_file_path(&self, wallet_name: &str) -> PathBuf {
+        let db_root = path_to_db_root(self.conf["dbdir"].as_str());
+        db_root.join(wallet_name.to_string() + ".dat")
     }
 
     /// MM database path.  
@@ -406,15 +422,33 @@ impl Drop for MmCtx {
     }
 }
 
+/// Returns the path to the MM database root.
+///
+/// Path priority:
+///  1- From db_root function arg.
+///  2- From the current directory where app is called.
+///  3- From the root application directory.
+#[cfg(not(target_arch = "wasm32"))]
+fn path_to_db_root(db_root: Option<&str>) -> PathBuf {
+    match db_root {
+        Some(dbdir) if !dbdir.is_empty() => PathBuf::from(dbdir),
+        _ => {
+            const LEAF: &str = "DB";
+
+            let from_current_dir = PathBuf::from(LEAF);
+            if from_current_dir.exists() {
+                from_current_dir
+            } else {
+                common::kdf_app_dir().unwrap_or_default().join(LEAF)
+            }
+        },
+    }
+}
+
 /// This function can be used later by an FFI function to open a GUI storage.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn path_to_dbdir(db_root: Option<&str>, db_id: &H160) -> PathBuf {
-    const DEFAULT_ROOT: &str = "DB";
-
-    let path = match db_root {
-        Some(dbdir) if !dbdir.is_empty() => Path::new(dbdir),
-        _ => Path::new(DEFAULT_ROOT),
-    };
+    let path = path_to_db_root(db_root);
 
     path.join(hex::encode(db_id.as_slice()))
 }

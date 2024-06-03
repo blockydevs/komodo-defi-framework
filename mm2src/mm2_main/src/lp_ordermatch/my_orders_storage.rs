@@ -212,7 +212,7 @@ mod native_impl {
                                     my_taker_order_file_path, my_taker_orders_dir};
     use mm2_io::fs::{read_dir_json, read_json, remove_file_async, write_json, FsJsonError};
 
-    const USE_TMP_FILE: bool = false;
+    const USE_TMP_FILE: bool = true;
 
     impl From<FsJsonError> for MyOrdersError {
         fn from(fs: FsJsonError) -> Self {

@@ -34,12 +34,10 @@ cfg_native! {
 
     use std::convert::TryFrom;
     use std::net::ToSocketAddrs;
-
     use futures::future::{Either, TryFutureExt};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::TcpStream;
     use tokio_rustls::{TlsConnector};
-    use tokio_rustls::webpki::DnsNameRef;
     use rustls::{ServerName};
 }
 
@@ -76,6 +74,16 @@ macro_rules! disconnect_and_return_if_err {
 /// Helper function casting mpsc::Receiver as Stream.
 fn rx_to_stream(rx: mpsc::Receiver<Vec<u8>>) -> impl Stream<Item = Vec<u8>, Error = io::Error> {
     rx.map_err(|_| panic!("errors not possible on rx"))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+/// Helper function to parse a a string DNS name into a ServerName.
+fn server_name_from_domain(dns_name: &str) -> Result<ServerName, String> {
+    match ServerName::try_from(dns_name) {
+        // The `ServerName` must be `DnsName` variant, SSL works with domain names and not IPs.
+        Ok(dns_name) if matches!(dns_name, ServerName::DnsName(_)) => Ok(dns_name),
+        _ => ERR!("Couldn't parse DNS name from '{}'", dns_name),
+    }
 }
 
 /// Electrum request RPC representation
@@ -386,18 +394,12 @@ impl ElectrumConnection {
                 };
 
                 let Some(dns_name) = uri.host().map(String::from) else {
-                    disconnect_and_return!(Irrecoverable, "Couldn't retrieve host from addr",  connection, event_handlers);
+                    disconnect_and_return!(Irrecoverable, "Couldn't retrieve host from address",  connection, event_handlers);
                 };
 
-                // Make sure that the host is a valid DNS name.
-                if let Err(e) = DnsNameRef::try_from_ascii_str(dns_name.as_str()) {
-                    disconnect_and_return!(
-                        Irrecoverable,
-                        format!("Invalid DNS name: {e:?}"),
-                        connection,
-                        event_handlers
-                    )
-                }
+                let Ok(dns) = server_name_from_domain(dns_name.as_str()) else {
+                    disconnect_and_return!(Irrecoverable, "Address isn't a valid domain name", connection, event_handlers);
+                };
 
                 let tls_connector = if connection.settings.disable_cert_verification {
                     TlsConnector::from(UNSAFE_TLS_CONFIG.clone())
@@ -406,13 +408,10 @@ impl ElectrumConnection {
                     TlsConnector::from(SAFE_TLS_CONFIG.clone())
                 };
 
-                Either::Right(TcpStream::connect(&socket_addr).and_then(move |stream| {
-                    // Can use `unwrap` cause `dns_name` is pre-checked.
-                    let dns = ServerName::try_from(dns_name.as_str())
-                        .map_err(|e| format!("{:?}", e))
-                        .unwrap();
-                    tls_connector.connect(dns, stream).map_ok(ElectrumStream::Tls)
-                }))
+                Either::Right(
+                    TcpStream::connect(&socket_addr)
+                        .and_then(move |stream| tls_connector.connect(dns, stream).map_ok(ElectrumStream::Tls)),
+                )
             },
             ElectrumProtocol::WS | ElectrumProtocol::WSS => {
                 disconnect_and_return!(

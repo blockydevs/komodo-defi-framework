@@ -37,7 +37,7 @@
 //!
 
 /******************************************************************************
- * Copyright © 2023 Pampex LTD and TillyHK LTD              *
+ * Copyright © 2023 Pampex LTD and TillyHK LTD                                *
  *                                                                            *
  * See the CONTRIBUTOR-LICENSE-AGREEMENT, COPYING, LICENSE-COPYRIGHT-NOTICE   *
  * and DEVELOPER-CERTIFICATE-OF-ORIGIN files in the LEGAL directory in        *
@@ -1527,7 +1527,7 @@ pub async fn recover_funds_of_swap(ctx: MmArc, req: Json) -> Result<Response<Vec
         "result": {
             "action": recover_data.action,
             "coin": recover_data.coin,
-            "tx_hash": recover_data.transaction.tx_hash(),
+            "tx_hash": recover_data.transaction.tx_hash_as_bytes(),
             "tx_hex": BytesJson::from(recover_data.transaction.tx_hex()),
         }
     })));
@@ -1831,17 +1831,22 @@ pub fn generate_secret() -> Result<[u8; 32], rand::Error> {
     Ok(sec)
 }
 
+/// Add refund fee to calculate maximum available balance for a swap (including possible refund)
+pub(crate) const INCLUDE_REFUND_FEE: bool = true;
+/// Do not add refund fee to calculate fee needed only to make a successful swap
+pub(crate) const NO_REFUND_FEE: bool = false;
+
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod lp_swap_tests {
     use super::*;
     use crate::mm2::lp_native_dex::{fix_directories, init_p2p};
+    use coins::hd_wallet::HDPathAccountToAddressId;
     use coins::utxo::rpc_clients::ElectrumConnectionSettings;
     use coins::utxo::utxo_standard::utxo_standard_coin_with_priv_key;
     use coins::utxo::{UtxoActivationParams, UtxoRpcMode};
     use coins::MarketCoinOps;
     use coins::PrivKeyActivationPolicy;
     use common::{block_on, new_uuid};
-    use crypto::StandardHDCoinAddress;
     use mm2_core::mm_ctx::MmCtxBuilder;
     use mm2_rpc::data::legacy::Priority;
     use mm2_test_helpers::for_tests::{morty_conf, rick_conf, MORTY_ELECTRUM_ADDRS, RICK_ELECTRUM_ADDRS};
@@ -2237,7 +2242,7 @@ mod lp_swap_tests {
             enable_params: Default::default(),
             priv_key_policy: PrivKeyActivationPolicy::ContextPrivKey,
             check_utxo_maturity: None,
-            path_to_address: StandardHDCoinAddress::default(),
+            path_to_address: HDPathAccountToAddressId::default(),
         }
     }
 

@@ -189,7 +189,7 @@ mod native_impl {
     use crate::mm2::lp_swap::{my_swap_file_path, my_swaps_dir};
     use mm2_io::fs::{read_dir_json, read_json, write_json, FsJsonError};
 
-    const USE_TMP_FILE: bool = false;
+    const USE_TMP_FILE: bool = true;
 
     impl From<FsJsonError> for SavedSwapError {
         fn from(fs: FsJsonError) -> Self {

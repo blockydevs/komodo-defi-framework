@@ -422,7 +422,7 @@ impl State for SpendMakerPayment {
             &None,
         );
 
-        let tx_hash = transaction.tx_hash();
+        let tx_hash = transaction.tx_hash_as_bytes();
         info!(
             "{}: Maker payment spend tx {:02x} sent by watcher",
             MAKER_PAYMENT_SPEND_SENT_LOG, tx_hash
@@ -496,7 +496,7 @@ impl State for RefundTakerPayment {
             &None,
         );
 
-        let tx_hash = transaction.tx_hash();
+        let tx_hash = transaction.tx_hash_as_bytes();
         info!(
             "{}: Taker payment refund tx {:02x} sent by watcher",
             TAKER_PAYMENT_REFUND_SENT_LOG, tx_hash

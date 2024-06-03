@@ -6,9 +6,9 @@ use coins::utxo::qtum::{qtum_coin_with_priv_key, QtumCoin};
 use coins::utxo::rpc_clients::UtxoRpcClientEnum;
 use coins::utxo::utxo_common::big_decimal_from_sat;
 use coins::utxo::{UtxoActivationParams, UtxoCommonOps};
-use coins::{CheckIfMyPaymentSentArgs, ConfirmPaymentInput, FeeApproxStage, FoundSwapTxSpend, MarketCoinOps, MmCoin,
-            RefundPaymentArgs, SearchForSwapTxSpendInput, SendPaymentArgs, SpendPaymentArgs, SwapOps,
-            SwapTxTypeWithSecretHash, TradePreimageValue, TransactionEnum, ValidatePaymentInput,
+use coins::{CheckIfMyPaymentSentArgs, ConfirmPaymentInput, DexFee, FeeApproxStage, FoundSwapTxSpend, MarketCoinOps,
+            MmCoin, RefundPaymentArgs, SearchForSwapTxSpendInput, SendPaymentArgs, SpendPaymentArgs, SwapOps,
+            SwapTxTypeWithSecretHash, TradePreimageValue, TransactionEnum, ValidateFeeArgs, ValidatePaymentInput,
             WaitForHTLCTxSpendArgs};
 use common::log::debug;
 use common::{temp_dir, DEX_FEE_ADDR_RAW_PUBKEY};
@@ -195,7 +195,7 @@ fn test_taker_spends_maker_payment() {
         wait_for_confirmation_until: 0,
     };
     let payment = maker_coin.send_maker_payment(maker_payment_args).wait().unwrap();
-    let payment_tx_hash = payment.tx_hash();
+    let payment_tx_hash = payment.tx_hash_as_bytes();
     let payment_tx_hex = payment.tx_hex();
     log!("Maker payment: {:?}", payment_tx_hash);
 
@@ -236,11 +236,8 @@ fn test_taker_spends_maker_payment() {
         swap_unique_data: &[],
         watcher_reward: false,
     };
-    let spend = taker_coin
-        .send_taker_spends_maker_payment(taker_spends_payment_args)
-        .wait()
-        .unwrap();
-    let spend_tx_hash = spend.tx_hash();
+    let spend = block_on(taker_coin.send_taker_spends_maker_payment(taker_spends_payment_args)).unwrap();
+    let spend_tx_hash = spend.tx_hash_as_bytes();
     let spend_tx_hex = spend.tx_hex();
     log!("Taker spends tx: {:?}", spend_tx_hash);
 
@@ -300,7 +297,7 @@ fn test_maker_spends_taker_payment() {
         wait_for_confirmation_until: 0,
     };
     let payment = taker_coin.send_taker_payment(taker_payment_args).wait().unwrap();
-    let payment_tx_hash = payment.tx_hash();
+    let payment_tx_hash = payment.tx_hash_as_bytes();
     let payment_tx_hex = payment.tx_hex();
     log!("Taker payment: {:?}", payment_tx_hash);
 
@@ -341,11 +338,8 @@ fn test_maker_spends_taker_payment() {
         swap_unique_data: &[],
         watcher_reward: false,
     };
-    let spend = maker_coin
-        .send_maker_spends_taker_payment(maker_spends_payment_args)
-        .wait()
-        .unwrap();
-    let spend_tx_hash = spend.tx_hash();
+    let spend = block_on(maker_coin.send_maker_spends_taker_payment(maker_spends_payment_args)).unwrap();
+    let spend_tx_hash = spend.tx_hash_as_bytes();
     let spend_tx_hex = spend.tx_hex();
     log!("Maker spends tx: {:?}", spend_tx_hash);
 
@@ -394,7 +388,7 @@ fn test_maker_refunds_payment() {
         wait_for_confirmation_until: 0,
     };
     let payment = coin.send_maker_payment(maker_payment).wait().unwrap();
-    let payment_tx_hash = payment.tx_hash();
+    let payment_tx_hash = payment.tx_hash_as_bytes();
     let payment_tx_hex = payment.tx_hex();
     log!("Maker payment: {:?}", payment_tx_hash);
 
@@ -425,7 +419,7 @@ fn test_maker_refunds_payment() {
         watcher_reward: false,
     };
     let refund = block_on(coin.send_maker_refunds_payment(maker_refunds_payment_args)).unwrap();
-    let refund_tx_hash = refund.tx_hash();
+    let refund_tx_hash = refund.tx_hash_as_bytes();
     let refund_tx_hex = refund.tx_hex();
     log!("Maker refunds payment: {:?}", refund_tx_hash);
 
@@ -466,7 +460,7 @@ fn test_taker_refunds_payment() {
         wait_for_confirmation_until: 0,
     };
     let payment = coin.send_taker_payment(taker_payment_args).wait().unwrap();
-    let payment_tx_hash = payment.tx_hash();
+    let payment_tx_hash = payment.tx_hash_as_bytes();
     let payment_tx_hex = payment.tx_hex();
     log!("Taker payment: {:?}", payment_tx_hash);
 
@@ -497,7 +491,7 @@ fn test_taker_refunds_payment() {
         watcher_reward: false,
     };
     let refund = block_on(coin.send_taker_refunds_payment(taker_refunds_payment_args)).unwrap();
-    let refund_tx_hash = refund.tx_hash();
+    let refund_tx_hash = refund.tx_hash_as_bytes();
     let refund_tx_hex = refund.tx_hex();
     log!("Taker refunds payment: {:?}", refund_tx_hash);
 
@@ -535,7 +529,7 @@ fn test_check_if_my_payment_sent() {
         wait_for_confirmation_until: 0,
     };
     let payment = coin.send_maker_payment(maker_payment_args).wait().unwrap();
-    let payment_tx_hash = payment.tx_hash();
+    let payment_tx_hash = payment.tx_hash_as_bytes();
     let payment_tx_hex = payment.tx_hex();
     log!("Maker payment: {:?}", payment_tx_hash);
 
@@ -592,7 +586,7 @@ fn test_search_for_swap_tx_spend_taker_spent() {
         wait_for_confirmation_until: 0,
     };
     let payment = maker_coin.send_maker_payment(maker_payment_args).wait().unwrap();
-    let payment_tx_hash = payment.tx_hash();
+    let payment_tx_hash = payment.tx_hash_as_bytes();
     let payment_tx_hex = payment.tx_hex();
     log!("Maker payment: {:?}", payment_tx_hash);
 
@@ -618,11 +612,8 @@ fn test_search_for_swap_tx_spend_taker_spent() {
         swap_unique_data: &[],
         watcher_reward: false,
     };
-    let spend = taker_coin
-        .send_taker_spends_maker_payment(taker_spends_payment_args)
-        .wait()
-        .unwrap();
-    let spend_tx_hash = spend.tx_hash();
+    let spend = block_on(taker_coin.send_taker_spends_maker_payment(taker_spends_payment_args)).unwrap();
+    let spend_tx_hash = spend.tx_hash_as_bytes();
     let spend_tx_hex = spend.tx_hex();
     log!("Taker spends tx: {:?}", spend_tx_hash);
 
@@ -674,7 +665,7 @@ fn test_search_for_swap_tx_spend_maker_refunded() {
         wait_for_confirmation_until: 0,
     };
     let payment = maker_coin.send_maker_payment(maker_payment_args).wait().unwrap();
-    let payment_tx_hash = payment.tx_hash();
+    let payment_tx_hash = payment.tx_hash_as_bytes();
     let payment_tx_hex = payment.tx_hex();
     log!("Maker payment: {:?}", payment_tx_hash);
 
@@ -702,7 +693,7 @@ fn test_search_for_swap_tx_spend_maker_refunded() {
         watcher_reward: false,
     };
     let refund = block_on(maker_coin.send_maker_refunds_payment(maker_refunds_payment_args)).unwrap();
-    let refund_tx_hash = refund.tx_hash();
+    let refund_tx_hash = refund.tx_hash_as_bytes();
     let refund_tx_hex = refund.tx_hex();
     log!("Maker refunds tx: {:?}", refund_tx_hash);
 
@@ -754,7 +745,7 @@ fn test_search_for_swap_tx_spend_not_spent() {
         wait_for_confirmation_until: 0,
     };
     let payment = maker_coin.send_maker_payment(maker_payment_args).wait().unwrap();
-    let payment_tx_hash = payment.tx_hash();
+    let payment_tx_hash = payment.tx_hash_as_bytes();
     let payment_tx_hex = payment.tx_hex();
     log!("Maker payment: {:?}", payment_tx_hash);
 
@@ -811,7 +802,7 @@ fn test_wait_for_tx_spend() {
         wait_for_confirmation_until: 0,
     };
     let payment = maker_coin.send_maker_payment(maker_payment_args).wait().unwrap();
-    let payment_tx_hash = payment.tx_hash();
+    let payment_tx_hash = payment.tx_hash_as_bytes();
     let payment_tx_hex = payment.tx_hex();
     log!("Maker payment: {:?}", payment_tx_hash);
 
@@ -864,10 +855,7 @@ fn test_wait_for_tx_spend() {
             swap_unique_data: &[],
             watcher_reward: false,
         };
-        let spend = taker_coin
-            .send_taker_spends_maker_payment(taker_spends_payment_args)
-            .wait()
-            .unwrap();
+        let spend = block_on(taker_coin.send_taker_spends_maker_payment(taker_spends_payment_args)).unwrap();
         unsafe { SPEND_TX = Some(spend) }
     });
 
@@ -1052,6 +1040,7 @@ fn test_get_max_taker_vol_and_trade_with_dynamic_trade_fee(coin: QtumCoin, priv_
     let max_trade_fee = block_on(coin.get_sender_trade_fee(
         TradePreimageValue::UpperBound(qtum_balance.clone()),
         FeeApproxStage::TradePreimage,
+        true,
     ))
     .expect("!get_sender_trade_fee");
     let max_trade_fee = max_trade_fee.amount.to_decimal();
@@ -1114,7 +1103,7 @@ fn test_get_max_taker_vol_and_trade_with_dynamic_trade_fee(coin: QtumCoin, priv_
 
     let dex_fee = dex_fee_amount("QTUM", "MYCOIN", &expected_max_taker_vol, &qtum_min_tx_amount);
     let _taker_fee_tx = coin
-        .send_taker_fee(&DEX_FEE_ADDR_RAW_PUBKEY, dex_fee, &[])
+        .send_taker_fee(&DEX_FEE_ADDR_RAW_PUBKEY, dex_fee, &[], timelock)
         .wait()
         .expect("!send_taker_fee");
     let taker_payment_args = SendPaymentArgs {
@@ -1743,3 +1732,65 @@ fn test_trade_qrc20_utxo() { trade_base_rel(("QICK", "MYCOIN")); }
 #[test]
 #[ignore]
 fn test_trade_utxo_qrc20() { trade_base_rel(("MYCOIN", "QICK")); }
+
+#[test]
+fn test_send_taker_fee_qtum() {
+    // generate QTUM coin with the dynamic fee and fill the wallet by 0.5 Qtums
+    let (_ctx, coin, _priv_key) =
+        generate_segwit_qtum_coin_with_random_privkey("QTUM", BigDecimal::try_from(0.5).unwrap(), Some(0));
+
+    let amount = BigDecimal::from_str("0.01").unwrap();
+    let tx = coin
+        .send_taker_fee(
+            &DEX_FEE_ADDR_RAW_PUBKEY,
+            DexFee::Standard(amount.clone().into()),
+            &[],
+            0,
+        )
+        .wait()
+        .expect("!send_taker_fee");
+    assert!(matches!(tx, TransactionEnum::UtxoTx(_)), "Expected UtxoTx");
+
+    coin.validate_fee(ValidateFeeArgs {
+        fee_tx: &tx,
+        expected_sender: coin.my_public_key().unwrap(),
+        fee_addr: &DEX_FEE_ADDR_RAW_PUBKEY,
+        dex_fee: &DexFee::Standard(amount.into()),
+        min_block_number: 0,
+        uuid: &[],
+    })
+    .wait()
+    .expect("!validate_fee");
+}
+
+#[test]
+fn test_send_taker_fee_qrc20() {
+    let (_ctx, coin, _priv_key) = generate_qrc20_coin_with_random_privkey(
+        "QICK",
+        BigDecimal::try_from(0.5).unwrap(),
+        BigDecimal::try_from(0.5).unwrap(),
+    );
+
+    let amount = BigDecimal::from_str("0.01").unwrap();
+    let tx = coin
+        .send_taker_fee(
+            &DEX_FEE_ADDR_RAW_PUBKEY,
+            DexFee::Standard(amount.clone().into()),
+            &[],
+            0,
+        )
+        .wait()
+        .expect("!send_taker_fee");
+    assert!(matches!(tx, TransactionEnum::UtxoTx(_)), "Expected UtxoTx");
+
+    coin.validate_fee(ValidateFeeArgs {
+        fee_tx: &tx,
+        expected_sender: coin.my_public_key().unwrap(),
+        fee_addr: &DEX_FEE_ADDR_RAW_PUBKEY,
+        dex_fee: &DexFee::Standard(amount.into()),
+        min_block_number: 0,
+        uuid: &[],
+    })
+    .wait()
+    .expect("!validate_fee");
+}

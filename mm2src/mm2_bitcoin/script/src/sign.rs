@@ -101,9 +101,9 @@ impl Sighash {
 #[derive(Clone, Debug)]
 pub struct UnsignedTransactionInput {
     pub previous_output: OutPoint,
+    pub prev_script: Script,
     pub sequence: u32,
     pub amount: u64,
-    pub witness: Vec<Vec<u8>>,
 }
 
 /// Used for resigning and loading test transactions
@@ -111,9 +111,9 @@ impl From<TransactionInput> for UnsignedTransactionInput {
     fn from(i: TransactionInput) -> Self {
         UnsignedTransactionInput {
             previous_output: i.previous_output,
+            prev_script: Vec::new().into(),
             sequence: i.sequence,
             amount: 0,
-            witness: i.script_witness.into_iter().map(Vec::from).collect(),
         }
     }
 }
@@ -662,8 +662,8 @@ mod tests {
                 index: previous_output_index,
                 hash: previous_tx_hash,
             },
+            prev_script: Vec::new().into(),
             amount: 0,
-            witness: vec![Vec::new()],
         };
 
         let output = TransactionOutput {
@@ -714,8 +714,8 @@ mod tests {
                 index: previous_output_index,
                 hash: previous_tx_hash,
             },
+            prev_script: Vec::new().into(),
             amount: 100,
-            witness: vec![Vec::new()],
         };
 
         let output = TransactionOutput {

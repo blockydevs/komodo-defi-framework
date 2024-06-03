@@ -19,8 +19,9 @@ pub(crate) mod websocket_transport;
 
 pub(crate) type Web3SendOut = BoxFuture<'static, Result<Json, Error>>;
 
+/// The transport layer for interacting with a Web3 provider.
 #[derive(Clone, Debug)]
-pub(crate) enum Web3Transport {
+pub enum Web3Transport {
     Http(http_transport::HttpTransport),
     Websocket(websocket_transport::WebsocketTransport),
     #[cfg(target_arch = "wasm32")]
@@ -61,7 +62,7 @@ impl Web3Transport {
         }
     }
 
-    #[cfg(any(test, target_arch = "wasm32"))]
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     pub fn new_http(node: http_transport::HttpTransportNode) -> Web3Transport {
         http_transport::HttpTransport::new(node).into()
     }
@@ -127,6 +128,10 @@ pub struct FeeHistoryResult {
     pub oldest_block: U256,
     #[serde(rename = "baseFeePerGas")]
     pub base_fee_per_gas: Vec<U256>,
+    #[serde(rename = "gasUsedRatio")]
+    pub gas_used_ratio: Vec<f64>,
+    #[serde(rename = "reward")]
+    pub priority_rewards: Option<Vec<Vec<U256>>>,
 }
 
 /// Generates a signed message and inserts it into the request payload.

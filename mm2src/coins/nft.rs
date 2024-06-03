@@ -8,15 +8,15 @@ pub(crate) mod storage;
 
 #[cfg(any(test, target_arch = "wasm32"))] mod nft_tests;
 
-use crate::{coin_conf, get_my_address, lp_coinfind_or_err, CoinsContext, MarketCoinOps, MmCoinEnum, MmCoinStruct,
-            MyAddressReq, WithdrawError};
+use crate::{coin_conf, get_my_address, lp_coinfind_or_err, CoinsContext, HDPathAccountToAddressId, MarketCoinOps,
+            MmCoinEnum, MmCoinStruct, MyAddressReq, WithdrawError};
 use nft_errors::{GetNftInfoError, UpdateNftError};
 use nft_structs::{Chain, ContractType, ConvertChain, Nft, NftFromMoralis, NftList, NftListReq, NftMetadataReq,
                   NftTransferHistory, NftTransferHistoryFromMoralis, NftTransfersReq, NftsTransferHistoryList,
                   TransactionNftDetails, UpdateNftReq, WithdrawNftReq};
 
 use crate::eth::{eth_addr_to_hex, get_eth_address, withdraw_erc1155, withdraw_erc721, EthCoin, EthCoinType,
-                 EthTxFeeDetails};
+                 EthTxFeeDetails, LegacyGasPrice, PayForGasOption};
 use crate::nft::nft_errors::{ClearNftDbError, MetaFromUrlError, ProtectFromSpamError, TransferConfirmationsError,
                              UpdateSpamPhishingError};
 use crate::nft::nft_structs::{build_nft_with_empty_meta, BuildNftFields, ClearNftDbReq, NftCommon, NftCtx, NftInfo,
@@ -24,7 +24,6 @@ use crate::nft::nft_structs::{build_nft_with_empty_meta, BuildNftFields, ClearNf
                               SpamContractReq, SpamContractRes, TransferMeta, TransferStatus, UriMeta};
 use crate::nft::storage::{NftListStorageOps, NftTransferHistoryStorageOps};
 use common::parse_rfc3339_to_timestamp;
-use crypto::StandardHDCoinAddress;
 use ethereum_types::{Address, H256};
 use futures::compat::Future01CompatExt;
 use futures::future::try_join_all;
@@ -610,7 +609,7 @@ async fn get_moralis_nft_list(
     let mut res_list = Vec::new();
     let ticker = chain.to_ticker();
     let conf = coin_conf(ctx, ticker);
-    let my_address = get_eth_address(ctx, &conf, ticker, &StandardHDCoinAddress::default()).await?;
+    let my_address = get_eth_address(ctx, &conf, ticker, &HDPathAccountToAddressId::default()).await?;
     let uri_without_cursor = construct_moralis_uri_for_nft(url, &my_address.wallet_address, chain)?;
 
     // The cursor returned in the previous response (used for getting the next page).
@@ -710,7 +709,7 @@ async fn get_moralis_nft_transfers(
     let mut res_list = Vec::new();
     let ticker = chain.to_ticker();
     let conf = coin_conf(ctx, ticker);
-    let my_address = get_eth_address(ctx, &conf, ticker, &StandardHDCoinAddress::default()).await?;
+    let my_address = get_eth_address(ctx, &conf, ticker, &HDPathAccountToAddressId::default()).await?;
 
     let mut uri_without_cursor = url.clone();
     uri_without_cursor.set_path(MORALIS_API_ENDPOINT);
@@ -821,7 +820,12 @@ async fn get_fee_details(eth_coin: &EthCoin, transaction_hash: &str) -> Option<E
         Some(r) => {
             let gas_used = r.gas_used.unwrap_or_default();
             match r.effective_gas_price {
-                Some(gas_price) => EthTxFeeDetails::new(gas_used, gas_price, fee_coin).ok(),
+                Some(gas_price) => EthTxFeeDetails::new(
+                    gas_used,
+                    PayForGasOption::Legacy(LegacyGasPrice { gas_price }),
+                    fee_coin,
+                )
+                .ok(),
                 None => {
                     let web3_tx = eth_coin
                         .web3()
@@ -832,7 +836,12 @@ async fn get_fee_details(eth_coin: &EthCoin, transaction_hash: &str) -> Option<E
                         .await
                         .ok()??;
                     let gas_price = web3_tx.gas_price.unwrap_or_default();
-                    EthTxFeeDetails::new(gas_used, gas_price, fee_coin).ok()
+                    EthTxFeeDetails::new(
+                        gas_used,
+                        PayForGasOption::Legacy(LegacyGasPrice { gas_price }),
+                        fee_coin,
+                    )
+                    .ok()
                 },
             }
         },
@@ -972,7 +981,7 @@ async fn update_nft_list<T: NftListStorageOps + NftTransferHistoryStorageOps>(
     let transfers = storage.get_transfers_from_block(*chain, scan_from_block).await?;
     let req = MyAddressReq {
         coin: chain.to_ticker().to_string(),
-        path_to_address: StandardHDCoinAddress::default(),
+        path_to_address: HDPathAccountToAddressId::default(),
     };
     let my_address = get_my_address(ctx.clone(), req).await?.wallet_address.to_lowercase();
     for transfer in transfers.into_iter() {

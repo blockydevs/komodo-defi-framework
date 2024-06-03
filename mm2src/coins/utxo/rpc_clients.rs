@@ -4,23 +4,22 @@
 mod electrum_rpc;
 pub use electrum_rpc::*;
 
-use crate::utxo::{sat_from_big_decimal, GetBlockHeaderError, GetTxError};
-use crate::{big_decimal_from_sat_unsigned, NumConversError, RpcTransportEventHandlerShared};
-use async_trait::async_trait;
+use crate::utxo::{sat_from_big_decimal, GetBlockHeaderError, GetTxError, NumConversError, NumConversResult};
+use crate::{big_decimal_from_sat_unsigned, MyAddressError, RpcTransportEventHandlerShared};
 use chain::{OutPoint, Transaction as UtxoTx, TransactionInput, TxHashAlgo};
-use derive_more::Display;
-use futures::channel::oneshot as async_oneshot;
-use futures::compat::Future01CompatExt;
-use futures::future::{FutureExt, TryFutureExt};
-use futures::lock::Mutex as AsyncMutex;
-use futures01::Future;
-
+use common::custom_iter::TryIntoGroupMap;
+use common::executor::Timer;
+use common::jsonrpc_client::{JsonRpcBatchClient, JsonRpcClient, JsonRpcError, JsonRpcErrorType, JsonRpcRequest,
+                             JsonRpcRequestEnum, JsonRpcResponseFut, RpcRes};
+use common::log::{error, info, warn};
+use common::{median, now_sec};
+use enum_derives::EnumFromStringify;
 use keys::hash::H256;
 use keys::Address;
-#[cfg(test)] use mocktopus::macros::*;
-
+use mm2_err_handle::prelude::*;
+use mm2_number::{BigDecimal, MmNumber};
 use rpc::v1::types::{Bytes as BytesJson, Transaction as RpcTransaction, H256 as H256Json};
-use serde_json::{self as json, Value as Json};
+use script::Script;
 use serialization::{deserialize, serialize, serialize_with_flags, CoinVariant, SERIALIZE_TRANSACTION_WITNESS};
 
 use std::collections::HashMap;
@@ -31,20 +30,20 @@ use std::ops::Deref;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
 
-use common::custom_iter::TryIntoGroupMap;
-use common::executor::Timer;
-use common::jsonrpc_client::{JsonRpcBatchClient, JsonRpcClient, JsonRpcError, JsonRpcErrorType, JsonRpcRequest,
-                             JsonRpcRequestEnum, JsonRpcResponseFut, RpcRes};
-use common::log::{error, info, warn};
-use common::{median, now_sec};
-
-use mm2_err_handle::prelude::*;
-use mm2_number::{BigDecimal, MmNumber};
+use async_trait::async_trait;
+use derive_more::Display;
+use futures::channel::oneshot as async_oneshot;
+use futures::compat::Future01CompatExt;
+use futures::future::{FutureExt, TryFutureExt};
+use futures::lock::Mutex as AsyncMutex;
+use futures01::Future;
+#[cfg(test)] use mocktopus::macros::*;
+use serde_json::{self as json, Value as Json};
 
 cfg_native! {
     use crate::RpcTransportEventHandler;
-
     use common::jsonrpc_client::{JsonRpcRemoteAddr, JsonRpcResponseEnum};
+
     use http::header::AUTHORIZATION;
     use http::{Request, StatusCode};
 }
@@ -198,6 +197,34 @@ pub struct UnspentInfo {
     /// The block height transaction mined in.
     /// Note None if the transaction is not mined yet.
     pub height: Option<u64>,
+    /// The script pubkey of the UTXO
+    pub script: Script,
+}
+
+impl UnspentInfo {
+    fn from_electrum(unspent: ElectrumUnspent, script: Script) -> UnspentInfo {
+        UnspentInfo {
+            outpoint: OutPoint {
+                hash: unspent.tx_hash.reversed().into(),
+                index: unspent.tx_pos,
+            },
+            value: unspent.value,
+            height: unspent.height,
+            script,
+        }
+    }
+
+    fn from_native(unspent: NativeUnspent, decimals: u8, height: Option<u64>) -> NumConversResult<UnspentInfo> {
+        Ok(UnspentInfo {
+            outpoint: OutPoint {
+                hash: unspent.txid.reversed().into(),
+                index: unspent.vout,
+            },
+            value: sat_from_big_decimal(&unspent.amount.to_decimal(), decimals)?,
+            height,
+            script: unspent.script_pub_key.0.into(),
+        })
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -230,11 +257,12 @@ pub enum EstimateFeeMode {
 pub type UtxoRpcResult<T> = Result<T, MmError<UtxoRpcError>>;
 pub type UtxoRpcFut<T> = Box<dyn Future<Item = T, Error = MmError<UtxoRpcError>> + Send + 'static>;
 
-#[derive(Debug, Display)]
+#[derive(Debug, Display, EnumFromStringify)]
 pub enum UtxoRpcError {
     Transport(JsonRpcError),
     ResponseParseError(JsonRpcError),
     InvalidResponse(String),
+    #[from_stringify("MyAddressError")]
     Internal(String),
 }
 
@@ -755,20 +783,10 @@ impl UtxoRpcClientOps for NativeClient {
             .list_unspent_impl(0, std::i32::MAX, vec![address.to_string()])
             .map_to_mm_fut(UtxoRpcError::from)
             .and_then(move |unspents| {
-                let unspents: UtxoRpcResult<Vec<_>> = unspents
-                    .into_iter()
-                    .map(|unspent| {
-                        Ok(UnspentInfo {
-                            outpoint: OutPoint {
-                                hash: unspent.txid.reversed().into(),
-                                index: unspent.vout,
-                            },
-                            value: sat_from_big_decimal(&unspent.amount.to_decimal(), decimals)?,
-                            height: None,
-                        })
-                    })
-                    .collect();
                 unspents
+                    .into_iter()
+                    .map(|unspent| Ok(UnspentInfo::from_native(unspent, decimals, None)?))
+                    .collect::<UtxoRpcResult<_>>()
             });
         Box::new(fut)
     }
@@ -796,14 +814,7 @@ impl UtxoRpcClientOps for NativeClient {
                                 UtxoRpcError::InvalidResponse(format!("Unexpected address '{}'", unspent.address))
                             })?
                             .clone();
-                        let unspent_info = UnspentInfo {
-                            outpoint: OutPoint {
-                                hash: unspent.txid.reversed().into(),
-                                index: unspent.vout,
-                            },
-                            value: sat_from_big_decimal(&unspent.amount.to_decimal(), decimals)?,
-                            height: None,
-                        };
+                        let unspent_info = UnspentInfo::from_native(unspent, decimals, None)?;
                         Ok((orig_address, unspent_info))
                     })
                     // Collect `(Address, UnspentInfo)` items into `HashMap<Address, Vec<UnspentInfo>>` grouped by the addresses.
