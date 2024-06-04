@@ -577,6 +577,8 @@ impl ElectrumConnection {
         // This is the remaining timeout for version checking.
         let timeout = (timeout - now.elapsed().as_secs_f64()).max(0.0);
 
+        // FIXME: Looks like electrum will return "unsupported protocol version" if we give it some unsupported range.
+        // When then do we need to have version negotiation logic? Electrum won't ever give out of range protocol version, right?
         let version_query_error = match client
             .server_version(&address, client.protocol_version())
             .compat()

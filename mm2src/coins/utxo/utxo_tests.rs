@@ -1549,19 +1549,24 @@ fn test_unavailable_electrum_proto_version() {
     );
 
     let conf = json!({"coin":"RICK","asset":"RICK","rpcport":8923});
+    let servers = ["electrum1.cipig.net:10020"];
     let req = json!({
          "method": "electrum",
-         "servers": [{"url":"electrum1.cipig.net:10020"}],
+         "servers": servers.iter().map(|server| json!({"url": server})).collect::<Vec<_>>(),
     });
 
     let ctx = MmCtxBuilder::new().into_mm_arc();
     let params = UtxoActivationParams::from_legacy_req(&req).unwrap();
     let priv_key = Secp256k1Secret::from([1; 32]);
-    let error = block_on(utxo_standard_coin_with_priv_key(&ctx, "RICK", &conf, &params, priv_key))
-        .err()
-        .unwrap();
-    log!("Error: {}", error);
-    assert!(error.contains("There are no Electrums with the required protocol version"));
+    let coin = block_on(utxo_standard_coin_with_priv_key(&ctx, "RICK", &conf, &params, priv_key)).unwrap();
+    if let UtxoRpcClientEnum::Electrum(ref electrum_client) = coin.as_ref().rpc_client {
+        for server in servers {
+            let error = block_on(electrum_client.get_block_count_from(server).compat()).err().unwrap();
+            assert!(error.to_string().contains("unsupported protocol version"));
+        }
+    } else {
+        panic!("Expected Electrum client");
+    }
 }
 
 #[test]
