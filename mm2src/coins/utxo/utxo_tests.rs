@@ -1561,7 +1561,9 @@ fn test_unavailable_electrum_proto_version() {
     let coin = block_on(utxo_standard_coin_with_priv_key(&ctx, "RICK", &conf, &params, priv_key)).unwrap();
     if let UtxoRpcClientEnum::Electrum(ref electrum_client) = coin.as_ref().rpc_client {
         for server in servers {
-            let error = block_on(electrum_client.get_block_count_from(server).compat()).err().unwrap();
+            let error = block_on(electrum_client.get_block_count_from(server).compat())
+                .err()
+                .unwrap();
             assert!(error.to_string().contains("unsupported protocol version"));
         }
     } else {
