@@ -16,5 +16,5 @@ pub use rpc_responses::*;
 pub fn electrum_script_hash(script: &[u8]) -> Vec<u8> {
     let mut sha = Sha256::new();
     sha.update(script);
-    sha.finalize().iter().copied().collect()
+    sha.finalize().iter().rev().copied().collect()
 }
