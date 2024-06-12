@@ -38,6 +38,7 @@ pub type InitPlatformCoinWithTokensTaskManagerShared<Platform> =
 #[derive(Clone, Debug, Deserialize)]
 pub struct TokenActivationRequest<Req> {
     ticker: String,
+    protocol: Option<CoinProtocol>,
     #[serde(flatten)]
     request: Req,
 }
@@ -92,8 +93,19 @@ pub enum InitTokensAsMmCoinsError {
     CouldNotFetchBalance(String),
     UnexpectedDerivationMethod(UnexpectedDerivationMethod),
     Internal(String),
-    TokenProtocolParseError { ticker: String, error: String },
-    UnexpectedTokenProtocol { ticker: String, protocol: CoinProtocol },
+    TokenProtocolParseError {
+        ticker: String,
+        error: String,
+    },
+    UnexpectedTokenProtocol {
+        ticker: String,
+        protocol: CoinProtocol,
+    },
+    ProtocolMissMatch {
+        ticker: String,
+        from_config: CoinProtocol,
+        from_request: CoinProtocol,
+    },
     Transport(String),
     InvalidPayload(String),
 }
@@ -110,6 +122,16 @@ impl From<CoinConfWithProtocolError> for InitTokensAsMmCoinsError {
             },
             CoinConfWithProtocolError::UnexpectedProtocol { ticker, protocol } => {
                 InitTokensAsMmCoinsError::UnexpectedTokenProtocol { ticker, protocol }
+            },
+
+            CoinConfWithProtocolError::ProtocolMissMatch {
+                ticker,
+                from_config,
+                from_request,
+            } => InitTokensAsMmCoinsError::ProtocolMissMatch {
+                ticker,
+                from_config,
+                from_request,
             },
         }
     }
@@ -138,7 +160,7 @@ where
         let token_params = tokens_requests
             .into_iter()
             .map(|req| -> Result<_, MmError<CoinConfWithProtocolError>> {
-                let (_, protocol): (_, T::TokenProtocol) = coin_conf_with_protocol(&ctx, &req.ticker)?;
+                let (_, protocol): (_, T::TokenProtocol) = coin_conf_with_protocol(&ctx, &req.ticker, req.protocol)?;
                 Ok(TokenActivationParams {
                     ticker: req.ticker,
                     activation_request: req.request,
@@ -260,6 +282,17 @@ pub enum EnablePlatformCoinWithTokensError {
         ticker: String,
         protocol: CoinProtocol,
     },
+    #[display(
+        fmt = "Protocol mismatch for token {}: from config {:?}, from request {:?}",
+        ticker,
+        from_config,
+        from_request
+    )]
+    ProtocolMissMatch {
+        ticker: String,
+        from_config: CoinProtocol,
+        from_request: CoinProtocol,
+    },
     #[display(fmt = "Error on platform coin {} creation: {}", ticker, error)]
     PlatformCoinCreationError {
         ticker: String,
@@ -300,6 +333,15 @@ impl From<CoinConfWithProtocolError> for EnablePlatformCoinWithTokensError {
                     error: err.to_string(),
                 }
             },
+            CoinConfWithProtocolError::ProtocolMissMatch {
+                ticker,
+                from_config,
+                from_request,
+            } => EnablePlatformCoinWithTokensError::ProtocolMissMatch {
+                ticker,
+                from_config,
+                from_request,
+            },
         }
     }
 }
@@ -326,6 +368,15 @@ impl From<InitTokensAsMmCoinsError> for EnablePlatformCoinWithTokensError {
             InitTokensAsMmCoinsError::InvalidPayload(e) => EnablePlatformCoinWithTokensError::InvalidPayload(e),
             InitTokensAsMmCoinsError::UnexpectedDerivationMethod(e) => {
                 EnablePlatformCoinWithTokensError::UnexpectedDerivationMethod(e.to_string())
+            },
+            InitTokensAsMmCoinsError::ProtocolMissMatch {
+                ticker,
+                from_config,
+                from_request,
+            } => EnablePlatformCoinWithTokensError::ProtocolMissMatch {
+                ticker,
+                from_config,
+                from_request,
             },
         }
     }
@@ -373,7 +424,8 @@ impl HttpStatusCode for EnablePlatformCoinWithTokensError {
             | EnablePlatformCoinWithTokensError::NoSuchTask(_)
             | EnablePlatformCoinWithTokensError::UnexpectedDeviceActivationPolicy
             | EnablePlatformCoinWithTokensError::FailedSpawningBalanceEvents(_)
-            | EnablePlatformCoinWithTokensError::UnexpectedTokenProtocol { .. } => StatusCode::BAD_REQUEST,
+            | EnablePlatformCoinWithTokensError::UnexpectedTokenProtocol { .. }
+            | EnablePlatformCoinWithTokensError::ProtocolMissMatch { .. } => StatusCode::BAD_REQUEST,
             EnablePlatformCoinWithTokensError::Transport(_) => StatusCode::BAD_GATEWAY,
         }
     }
@@ -449,7 +501,7 @@ where
         ));
     }
 
-    let (platform_conf, platform_protocol) = coin_conf_with_protocol(&ctx, &req.ticker)?;
+    let (platform_conf, platform_protocol) = coin_conf_with_protocol(&ctx, &req.ticker, None)?;
 
     let platform_coin = Platform::enable_platform_coin(
         ctx.clone(),

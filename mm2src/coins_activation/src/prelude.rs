@@ -4,6 +4,7 @@ use coins::sia::SiaCoinActivationParams;
 use coins::utxo::UtxoActivationParams;
 use coins::z_coin::ZcoinActivationParams;
 use coins::{coin_conf, CoinBalance, CoinProtocol, DerivationMethodResponse, MmCoinEnum};
+use common::drop_mutability;
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
 use mm2_number::BigDecimal;
@@ -64,8 +65,19 @@ pub trait TryFromCoinProtocol {
 #[derive(Debug)]
 pub enum CoinConfWithProtocolError {
     ConfigIsNotFound(String),
-    CoinProtocolParseError { ticker: String, err: json::Error },
-    UnexpectedProtocol { ticker: String, protocol: CoinProtocol },
+    CoinProtocolParseError {
+        ticker: String,
+        err: json::Error,
+    },
+    UnexpectedProtocol {
+        ticker: String,
+        protocol: CoinProtocol,
+    },
+    ProtocolMissMatch {
+        ticker: String,
+        from_config: CoinProtocol,
+        from_request: CoinProtocol,
+    },
 }
 
 /// Determines the coin configuration and protocol information for a given coin or NFT ticker.
@@ -74,6 +86,7 @@ pub enum CoinConfWithProtocolError {
 pub fn coin_conf_with_protocol<T: TryFromCoinProtocol>(
     ctx: &MmArc,
     coin: &str,
+    protocol_from_request: Option<CoinProtocol>,
 ) -> Result<(Json, T), MmError<CoinConfWithProtocolError>> {
     let (conf, coin_protocol) = match Chain::from_nft_ticker(coin) {
         Ok(chain) => {
@@ -85,13 +98,35 @@ pub fn coin_conf_with_protocol<T: TryFromCoinProtocol>(
             (platform_conf, nft_protocol)
         },
         Err(_) => {
-            let conf = coin_conf(ctx, coin);
-            let coin_protocol: CoinProtocol = json::from_value(conf["protocol"].clone()).map_to_mm(|err| {
-                CoinConfWithProtocolError::CoinProtocolParseError {
-                    ticker: coin.into(),
-                    err,
-                }
-            })?;
+            let mut conf = coin_conf(ctx, coin);
+            let coin_protocol: CoinProtocol = match json::from_value(conf["protocol"].clone()) {
+                Ok(protocol_from_config) => {
+                    if let Some(protocol_from_request) = protocol_from_request {
+                        if protocol_from_request != protocol_from_config {
+                            return MmError::err(CoinConfWithProtocolError::ProtocolMissMatch {
+                                ticker: coin.into(),
+                                from_config: protocol_from_config,
+                                from_request: protocol_from_request,
+                            });
+                        }
+                    }
+                    protocol_from_config
+                },
+                Err(err) => match protocol_from_request {
+                    Some(protocol_from_request) => {
+                        // Todo: Remove this once order matching using contract instead of ticker is implemented
+                        conf["wallet_only"] = json::Value::Bool(true);
+                        protocol_from_request
+                    },
+                    None => {
+                        return MmError::err(CoinConfWithProtocolError::CoinProtocolParseError {
+                            ticker: coin.into(),
+                            err,
+                        })
+                    },
+                },
+            };
+            drop_mutability!(conf);
             (conf, coin_protocol)
         },
     };

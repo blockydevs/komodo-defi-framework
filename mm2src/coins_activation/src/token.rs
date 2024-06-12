@@ -49,6 +49,17 @@ pub enum EnableTokenError {
         ticker: String,
         protocol: CoinProtocol,
     },
+    #[display(
+        fmt = "Protocol mismatch for token {}: from config {:?}, from request {:?}",
+        ticker,
+        from_config,
+        from_request
+    )]
+    ProtocolMissMatch {
+        ticker: String,
+        from_config: CoinProtocol,
+        from_request: CoinProtocol,
+    },
     #[display(fmt = "Platform coin {} is not activated", _0)]
     PlatformCoinIsNotActivated(String),
     #[display(fmt = "{} is not a platform coin for token {}", platform_coin_ticker, token_ticker)]
@@ -87,6 +98,15 @@ impl From<CoinConfWithProtocolError> for EnableTokenError {
             CoinConfWithProtocolError::UnexpectedProtocol { ticker, protocol } => {
                 EnableTokenError::UnexpectedTokenProtocol { ticker, protocol }
             },
+            CoinConfWithProtocolError::ProtocolMissMatch {
+                ticker,
+                from_config,
+                from_request,
+            } => EnableTokenError::ProtocolMissMatch {
+                ticker,
+                from_config,
+                from_request,
+            },
         }
     }
 }
@@ -104,6 +124,7 @@ impl From<BalanceError> for EnableTokenError {
 #[derive(Debug, Deserialize)]
 pub struct EnableTokenRequest<T> {
     ticker: String,
+    protocol: Option<CoinProtocol>,
     activation_params: T,
 }
 
@@ -120,7 +141,8 @@ where
         return MmError::err(EnableTokenError::TokenIsAlreadyActivated(req.ticker));
     }
 
-    let (_, token_protocol): (_, Token::ProtocolInfo) = coin_conf_with_protocol(&ctx, &req.ticker)?;
+    let (_, token_protocol): (_, Token::ProtocolInfo) =
+        coin_conf_with_protocol(&ctx, &req.ticker, req.protocol.clone())?;
 
     let platform_coin = lp_coinfind_or_err(&ctx, token_protocol.platform_coin_ticker())
         .await
@@ -163,7 +185,8 @@ impl HttpStatusCode for EnableTokenError {
             | EnableTokenError::PlatformCoinIsNotActivated(_)
             | EnableTokenError::TokenConfigIsNotFound { .. }
             | EnableTokenError::UnexpectedTokenProtocol { .. }
-            | EnableTokenError::InvalidPayload(_) => StatusCode::BAD_REQUEST,
+            | EnableTokenError::InvalidPayload(_)
+            | EnableTokenError::ProtocolMissMatch { .. } => StatusCode::BAD_REQUEST,
             EnableTokenError::TokenProtocolParseError { .. }
             | EnableTokenError::UnsupportedPlatformCoin { .. }
             | EnableTokenError::UnexpectedDerivationMethod(_)
