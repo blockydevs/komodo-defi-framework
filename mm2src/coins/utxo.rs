@@ -143,7 +143,6 @@ pub type RecentlySpentOutPointsGuard<'a> = AsyncMutexGuard<'a, RecentlySpentOutP
 pub enum ScripthashNotification {
     Triggered(String),
     SubscribeToAddresses(HashSet<Address>),
-    RefreshSubscriptions,
 }
 
 pub type ScripthashNotificationSender = Option<UnboundedSender<ScripthashNotification>>;

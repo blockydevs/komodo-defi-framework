@@ -10,9 +10,9 @@ use gstuff::now_ms;
 
 /// A struct that encapsulates an Electrum connection and its information.
 #[derive(Debug)]
-pub(super) struct ConnectionContext {
+pub struct ConnectionContext {
     /// The electrum connection.
-    pub(super) connection: Arc<ElectrumConnection>,
+    pub connection: Arc<ElectrumConnection>,
     /// The list of addresses subscribed to the connection.
     subs: Mutex<Vec<Address>>,
     /// How long to suspend the server the next time it disconnects (in milliseconds).

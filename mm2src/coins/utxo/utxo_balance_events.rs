@@ -109,24 +109,6 @@ impl EventBehaviour for UtxoStandardCoin {
 
                     continue;
                 },
-                ScripthashNotification::RefreshSubscriptions => {
-                    let my_addresses = try_or_continue!(self.all_addresses().await);
-                    match subscribe_to_addresses(self.as_ref(), my_addresses).await {
-                        Ok(map) => scripthash_to_address_map = map,
-                        Err(e) => {
-                            log::error!("{e}");
-
-                            ctx.stream_channel_controller
-                                .broadcast(Event::new(
-                                    format!("{}:{}", Self::error_event_name(), self.ticker()),
-                                    json!({ "error": e }).to_string(),
-                                ))
-                                .await;
-                        },
-                    };
-
-                    continue;
-                },
             };
 
             let address = match scripthash_to_address_map.get(&notified_scripthash) {
