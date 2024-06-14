@@ -1,20 +1,17 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
-use super::super::client::{ElectrumClientImpl};
+use super::super::client::ElectrumClientImpl;
 use super::super::connection::{ElectrumConnection, ElectrumConnectionSettings};
 use super::super::constants::PING_INTERVAL;
 use super::connection_context::ConnectionContext;
-use super::{ConnectionManagerTrait};
+use super::ConnectionManagerTrait;
 
-use crate::utxo::rpc_clients::UtxoRpcClientOps;
-use common::executor::abortable_queue::AbortableQueue;
-use common::executor::abortable_queue::WeakSpawner;
+use common::executor::abortable_queue::{AbortableQueue, WeakSpawner};
 use common::executor::{AbortableSystem, SpawnFuture, Timer};
 use common::log::warn;
 use futures::channel::mpsc;
-use futures::{StreamExt};
-use keys::Address;
+use futures::StreamExt;
 
 use async_trait::async_trait;
 use futures::compat::Future01CompatExt;
@@ -102,8 +99,6 @@ impl ConnectionManagerSelective {
     }
 }
 
-// FIXME: A lot of the methods here are c/v from the multiple connection manager.
-// Generalize by having them in the trait default implementation instead.
 #[async_trait]
 impl ConnectionManagerTrait for Arc<ConnectionManagerSelective> {
     fn copy(&self) -> Box<dyn ConnectionManagerTrait> { Box::new(self.clone()) }
@@ -133,47 +128,6 @@ impl ConnectionManagerTrait for Arc<ConnectionManagerSelective> {
         // We don't currently have an active connection.
         self.trigger_reconnection();
         vec![]
-    }
-
-    /// Subscribe the list of addresses to our active connections.
-    ///
-    /// There is a bit of indirection here. We register the abandoned addresses on `on_disconnected` with
-    /// the client to queue them for `utxo_balance_events` which in turn calls this method back to re-subscribe
-    /// the abandoned addresses. We could have instead directly re-subscribed the addresses here in the connection
-    /// manager without sending them to `utxo_balance_events`. However, we don't do that so that `utxo_balance_events`
-    /// knows about all the added addresses. If it doesn't know about them, it won't be able to retrieve the triggered
-    /// address when its script hash is notified.
-    async fn add_subscriptions(&self, addresses: &HashMap<String, Address>) {
-        // FIXME: The multiple connection manager implementation of this method is still
-        // compatible here. Let's just use both as trait default method.
-        for (scripthash, address) in addresses.iter() {
-            // Keep trying to subscribe the address until successful.
-            loop {
-                let Some(client) = self.get_client() else {
-                    // The manager is either not initialized or the client is dropped.
-                    // If the client is dropped, the manager is no longer usable.
-                    return;
-                };
-                let active_connection = self.get_active_connections().await.first().cloned();
-                let Some(active_connection) = active_connection else {
-                    // If there is no active connection, wait for a connection to be established/activated.
-                    Timer::sleep(1.).await;
-                    continue;
-                };
-                if client
-                    .blockchain_scripthash_subscribe_using(active_connection.address(), scripthash.clone())
-                    .compat()
-                    .await
-                    .is_ok()
-                {
-                    if let Some(connection_ctx) = self.connections.get(active_connection.address()) {
-                        connection_ctx.add_sub(address.clone());
-                        // Address subscribed, move to the next one.
-                        break;
-                    }
-                }
-            }
-        }
     }
 
     fn on_disconnected(&self, server_address: &str) {

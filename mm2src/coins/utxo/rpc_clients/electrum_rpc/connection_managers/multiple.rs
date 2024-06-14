@@ -1,18 +1,15 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock, Weak};
 
-use super::super::client::{ ElectrumClientImpl};
+use super::super::client::ElectrumClientImpl;
 use super::super::connection::{ElectrumConnection, ElectrumConnectionSettings};
 use super::super::constants::PING_INTERVAL;
 use super::connection_context::ConnectionContext;
-use super::{ConnectionManagerTrait};
+use super::ConnectionManagerTrait;
 
-use crate::utxo::rpc_clients::UtxoRpcClientOps;
-use common::executor::abortable_queue::AbortableQueue;
-use common::executor::abortable_queue::WeakSpawner;
+use common::executor::abortable_queue::{AbortableQueue, WeakSpawner};
 use common::executor::{AbortableSystem, SpawnFuture, Timer};
 use common::log::warn;
-use keys::Address;
 
 use async_trait::async_trait;
 use futures::compat::Future01CompatExt;
@@ -77,51 +74,6 @@ impl ConnectionManagerTrait for Arc<ConnectionManagerMultiple> {
             }
         }
         connections
-    }
-
-    /// Subscribe the list of addresses to our active connections.
-    ///
-    /// There is a bit of indirection here. We register the abandoned addresses on `on_disconnected` with
-    /// the client to queue them for `utxo_balance_events` which in turn calls this method back to re-subscribe
-    /// the abandoned addresses. We could have instead directly re-subscribed the addresses here in the connection
-    /// manager without sending them to `utxo_balance_events`. However, we don't do that so that `utxo_balance_events`
-    /// knows about all the added addresses. If it doesn't know about them, it won't be able to retrieve the triggered
-    /// address when its script hash is notified.
-    async fn add_subscriptions(&self, addresses: &HashMap<String, Address>) {
-        let mut addresses = addresses.clone();
-        loop {
-            let Some((scripthash, address)) = addresses.iter().next().map(|(s, a)| (s.clone(), a.clone())) else {
-                // `addresses` set is empty, subscribed all the addresses.
-                break;
-            };
-            let Some(client) = self.get_client() else {
-                // The manager is either not initialized or the client is dropped.
-                // If the client is dropped, the manager is no longer usable.
-                return;
-            };
-            let connections = self.get_active_connections().await;
-            if connections.is_empty() {
-                // If there are no active connections, wait for a connection to be established.
-                Timer::sleep(1.).await;
-                continue;
-            }
-            // Try to subscribe the address to any connection we have.
-            for connection in connections {
-                if client
-                    .blockchain_scripthash_subscribe_using(connection.address(), scripthash.clone())
-                    .compat()
-                    .await
-                    .is_ok()
-                {
-                    if let Some(connection_ctx) = self.connections.get(connection.address()) {
-                        connection_ctx.add_sub(address);
-                        // This address has been registered to a connection, remove it from the list.
-                        addresses.remove(&scripthash);
-                        break;
-                    }
-                }
-            }
-        }
     }
 
     fn on_disconnected(&self, server_address: &str) {
