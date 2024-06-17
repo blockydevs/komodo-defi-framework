@@ -53,7 +53,7 @@ pub struct WebsocketTransport {
 
 #[derive(Clone, Debug)]
 struct ControllerChannel {
-    tx: Arc<AsyncMutex<UnboundedSender<ControllerMessage>>>,
+    tx: UnboundedSender<ControllerMessage>,
     rx: Arc<AsyncMutex<UnboundedReceiver<ControllerMessage>>>,
 }
 
@@ -88,7 +88,7 @@ impl WebsocketTransport {
             event_handlers,
             request_id: Arc::new(AtomicUsize::new(1)),
             controller_channel: ControllerChannel {
-                tx: Arc::new(AsyncMutex::new(req_tx)),
+                tx: req_tx,
                 rx: Arc::new(AsyncMutex::new(req_rx)),
             },
             connection_guard: Arc::new(AsyncMutex::new(())),
@@ -309,7 +309,7 @@ impl WebsocketTransport {
     }
 
     pub(crate) async fn stop_connection_loop(&self) {
-        let mut tx = self.controller_channel.tx.lock().await;
+        let mut tx = self.controller_channel.tx.clone();
         tx.send(ControllerMessage::Close)
             .await
             .expect("receiver channel must be alive");
@@ -353,7 +353,7 @@ async fn send_request(
         };
     }
 
-    let mut tx = transport.controller_channel.tx.lock().await;
+    let mut tx = transport.controller_channel.tx.clone();
 
     let (notification_sender, notification_receiver) = futures::channel::oneshot::channel::<Vec<u8>>();
 
