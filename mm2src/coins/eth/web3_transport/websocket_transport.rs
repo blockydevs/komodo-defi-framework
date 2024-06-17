@@ -47,11 +47,11 @@ pub struct WebsocketTransport {
     node: WebsocketTransportNode,
     event_handlers: Vec<RpcTransportEventHandlerShared>,
     pub(crate) gui_auth_validation_generator: Option<GuiAuthValidationGenerator>,
-    controller_channel: Arc<ControllerChannel>,
+    controller_channel: ControllerChannel,
     connection_guard: Arc<AsyncMutex<()>>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct ControllerChannel {
     tx: Arc<AsyncMutex<UnboundedSender<ControllerMessage>>>,
     rx: Arc<AsyncMutex<UnboundedReceiver<ControllerMessage>>>,
@@ -90,8 +90,7 @@ impl WebsocketTransport {
             controller_channel: ControllerChannel {
                 tx: Arc::new(AsyncMutex::new(req_tx)),
                 rx: Arc::new(AsyncMutex::new(req_rx)),
-            }
-            .into(),
+            },
             connection_guard: Arc::new(AsyncMutex::new(())),
             gui_auth_validation_generator: None,
             last_request_failed: Arc::new(AtomicBool::new(false)),
