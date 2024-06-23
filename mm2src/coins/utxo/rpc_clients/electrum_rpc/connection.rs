@@ -630,7 +630,7 @@ impl ElectrumConnection {
             }
         }
 
-        let mut address = connection.address().to_string();
+        let address = connection.address().to_string();
         let event_handlers = client.event_handlers();
         // This is the timeout for connection establishment and version querying (i.e. the whole method).
         // The caller is guaranteed that the method will return within this time.
@@ -660,13 +660,13 @@ impl ElectrumConnection {
         }
 
         let mut secure_connection = false;
-        match connection.settings.protocol {
+        let protocol_prefixed_address = match connection.settings.protocol {
             ElectrumProtocol::WS => {
-                address.insert_str(0, "ws://");
+                format!("ws://{address}")
             },
             ElectrumProtocol::WSS => {
-                address.insert_str(0, "wss://");
                 secure_connection = true;
+                format!("wss://{address}")
             },
             ElectrumProtocol::TCP | ElectrumProtocol::SSL => {
                 disconnect_and_return!(
@@ -682,7 +682,7 @@ impl ElectrumConnection {
         let now = Instant::now();
         let Ok(connect_f) = ws_transport(
             CONN_IDX.fetch_add(1, AtomicOrdering::Relaxed),
-            &address,
+            &protocol_prefixed_address,
             &connection.weak_spawner()
         )
         .boxed()

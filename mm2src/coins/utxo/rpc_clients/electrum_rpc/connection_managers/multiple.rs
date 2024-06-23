@@ -10,10 +10,10 @@ use super::ConnectionManagerTrait;
 use common::executor::abortable_queue::{AbortableQueue, WeakSpawner};
 use common::executor::{AbortableSystem, SpawnFuture, Timer};
 use common::log::warn;
+use common::now_ms;
 
 use async_trait::async_trait;
 use futures::compat::Future01CompatExt;
-use gstuff::now_ms;
 
 #[derive(Debug)]
 pub struct ConnectionManagerMultiple {

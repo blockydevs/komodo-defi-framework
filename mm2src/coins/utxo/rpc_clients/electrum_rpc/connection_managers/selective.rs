@@ -10,12 +10,12 @@ use super::ConnectionManagerTrait;
 use common::executor::abortable_queue::{AbortableQueue, WeakSpawner};
 use common::executor::{AbortableSystem, SpawnFuture, Timer};
 use common::log::warn;
-use futures::channel::mpsc;
-use futures::StreamExt;
+use common::now_ms;
 
 use async_trait::async_trait;
+use futures::channel::mpsc;
 use futures::compat::Future01CompatExt;
-use gstuff::now_ms;
+use futures::StreamExt;
 
 #[derive(Debug)]
 pub struct ConnectionManagerSelective {

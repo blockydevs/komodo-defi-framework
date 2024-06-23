@@ -4,9 +4,8 @@ use std::sync::{Arc, Mutex};
 use super::super::connection::ElectrumConnection;
 use super::super::constants::FIRST_SUSPEND_TIME;
 
+use common::now_ms;
 use keys::Address;
-
-use gstuff::now_ms;
 
 /// A struct that encapsulates an Electrum connection and its information.
 #[derive(Debug)]
