@@ -172,8 +172,9 @@ impl ConnectionManagerTrait for Arc<ConnectionManagerSelective> {
                 let Some(client) = manager.get_client() else { return };
                 // We are disconnected at the point, try to connect to a server.
                 // List all the primary connections first, then the secondary ones.
-                let mut connections = manager.get_primary_connections().collect::<Vec<_>>();
-                connections.extend(manager.get_secondary_connections());
+                let connections = manager
+                    .get_primary_connections()
+                    .chain(manager.get_secondary_connections());
 
                 for connection in connections {
                     let Some(connection_ctx) = manager.connections.get(connection.address()) else { continue };
