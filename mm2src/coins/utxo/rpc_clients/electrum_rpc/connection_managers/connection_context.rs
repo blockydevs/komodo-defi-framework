@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::mem;
 use std::sync::{Arc, Mutex};
 
@@ -13,7 +14,7 @@ pub struct ConnectionContext {
     /// The electrum connection.
     pub connection: Arc<ElectrumConnection>,
     /// The list of addresses subscribed to the connection.
-    subs: Mutex<Vec<Address>>,
+    subs: Mutex<HashSet<Address>>,
     /// How long to suspend the server the next time it disconnects (in milliseconds).
     next_suspend_time: Mutex<u64>,
     /// When was the connection last disconnected.
@@ -25,7 +26,7 @@ impl ConnectionContext {
     pub(super) fn new(connection: ElectrumConnection) -> Self {
         ConnectionContext {
             connection: Arc::new(connection),
-            subs: Mutex::new(Vec::new()),
+            subs: Mutex::new(HashSet::new()),
             next_suspend_time: Mutex::new(FIRST_SUSPEND_TIME),
             disconnected_at: Mutex::new(0),
         }
@@ -41,7 +42,7 @@ impl ConnectionContext {
     ///
     /// Doubles the suspend time and sets the disconnection time to `now`.
     /// Also clears the subs list and returns it.
-    pub(super) fn disconnected(&self) -> Vec<Address> {
+    pub(super) fn disconnected(&self) -> HashSet<Address> {
         // The max time to suspend a server, 12h.
         const MAX_SUSPEND_TIME: u64 = 12 * 60 * 60;
         *self.disconnected_at.lock().unwrap() = now_ms();
@@ -56,5 +57,5 @@ impl ConnectionContext {
     }
 
     /// Adds a subscription to the connection context.
-    pub(super) fn add_sub(&self, address: Address) { self.subs.lock().unwrap().push(address); }
+    pub(super) fn add_sub(&self, address: Address) { self.subs.lock().unwrap().insert(address); }
 }

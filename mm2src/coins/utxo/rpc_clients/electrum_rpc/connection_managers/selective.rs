@@ -146,7 +146,7 @@ impl ConnectionManagerTrait for Arc<ConnectionManagerSelective> {
         let abandoned_subs = connection_ctx.disconnected();
         // Re-subscribe the abandoned addresses using the client.
         if let Some(client) = self.get_client() {
-            client.subscribe_addresses(abandoned_subs.into_iter().collect()).ok();
+            client.subscribe_addresses(abandoned_subs).ok();
         };
     }
 
