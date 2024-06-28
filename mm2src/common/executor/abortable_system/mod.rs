@@ -37,7 +37,7 @@ pub trait AbortableSystem: From<InnerShared<Self::Inner>> {
         if inner_locked.is_aborted() {
             return Err(AbortedError);
         }
-        let mut previous_inner = std::mem::replace(&mut *inner_locked, Self::Inner::default());
+        let mut previous_inner = std::mem::take(&mut *inner_locked);
         previous_inner.abort_all().ok();
         Ok(())
     }
