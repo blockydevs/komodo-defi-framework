@@ -73,4 +73,6 @@ impl SystemInner for ShutdownInnerState {
         *self = ShutdownInnerState::Aborted;
         Ok(())
     }
+
+    fn is_aborted(&self) -> bool { matches!(self, ShutdownInnerState::Aborted) }
 }

@@ -30,14 +30,15 @@ pub trait AbortableSystem: From<InnerShared<Self::Inner>> {
     /// to the initial state for further use.
     fn abort_all_and_reset(&self) -> Result<(), AbortedError> {
         let inner = self.__inner();
-        // FIXME: Imagine if the caller of this method `abort_all_and_reset` is already running inside this abortable system.
-        // In the call to `abort_all`, the system will be abort (or not yet since no await was called in between?), this means that
-        // setting `inner_locked` to default will never happen? right?
         let mut inner_locked = inner.lock();
-        // FIXME: A fix to the above issue is to take out the content of `inner_locked` and defer dropping it until the end of the function.
-        // But let's try this out first and test if it works fine already (since no await was called in this method, it should run till completion).
-        inner_locked.abort_all()?;
-        *inner_locked = Self::Inner::default();
+        // Don't allow resetting the system state if the system is already aborted. If the system is
+        // aborted this is because its parent was aborted as well. Resetting it will leave the system
+        // dangling with no parent to abort it (could still be aborted manually of course).
+        if inner_locked.is_aborted() {
+            return Err(AbortedError);
+        }
+        let mut previous_inner = std::mem::replace(&mut *inner_locked, Self::Inner::default());
+        previous_inner.abort_all().ok();
         Ok(())
     }
 
@@ -79,6 +80,9 @@ pub trait AbortableSystem: From<InnerShared<Self::Inner>> {
 pub trait SystemInner: Default + Send + 'static {
     /// Aborts all spawned futures and subsystems if they present.
     fn abort_all(&mut self) -> Result<(), AbortedError>;
+
+    /// Returns whether the system has already been aborted.
+    fn is_aborted(&self) -> bool;
 }
 
 #[cfg(test)]

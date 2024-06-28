@@ -542,7 +542,6 @@ impl ElectrumConnection {
 
                 error!("{address} connection dropped due to: {err:?}");
                 event_handlers.on_disconnected(&address).ok();
-                // FIXME: This will call abort all spawned tasks. INCLUDING THIS ONE WE ARE RUNNING OFF OF.
                 connection.disconnect(Some(err)).await;
             }
         };
@@ -803,7 +802,6 @@ impl ElectrumConnection {
 
                 error!("{address} connection dropped due to: {err:?}");
                 event_handlers.on_disconnected(&address).ok();
-                // FIXME: This will call abort all spawned tasks. INCLUDING THIS ONE WE ARE RUNNING OFF OF.
                 connection.disconnect(Some(err)).await;
             }
         };

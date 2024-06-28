@@ -71,9 +71,6 @@ pub struct ElectrumClientImpl {
     next_id: AtomicU64,
     negotiate_version: bool,
     protocol_version: OrdRange<f32>,
-    // FIXME: What are these used for? Looks like `ConcurrentRequestMap` is used for caching already running requests
-    // to not execute them again. This would make sense if we perform such a request a lot & it's expensive to perform.
-    // Also, if `ConcurrentRequestMap` is needed, should we can also consider improving it with a cache timeout mechanism.
     get_balance_concurrent_map: ConcurrentRequestMap<String, ElectrumBalance>,
     list_unspent_concurrent_map: ConcurrentRequestMap<String, Vec<ElectrumUnspent>>,
     block_headers_storage: BlockHeaderStorage,

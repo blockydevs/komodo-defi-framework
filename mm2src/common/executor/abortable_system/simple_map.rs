@@ -81,6 +81,8 @@ impl<FutureId: FutureIdTrait> SystemInner for SimpleMapInnerState<FutureId> {
         *self = SimpleMapInnerState::Aborted;
         Ok(())
     }
+
+    fn is_aborted(&self) -> bool { matches!(self, SimpleMapInnerState::Aborted) }
 }
 
 impl<FutureId: FutureIdTrait> SimpleMapInnerState<FutureId> {

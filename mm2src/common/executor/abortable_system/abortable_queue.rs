@@ -232,6 +232,8 @@ impl SystemInner for QueueInnerState {
         *self = QueueInnerState::Aborted;
         Ok(())
     }
+
+    fn is_aborted(&self) -> bool { matches!(self, QueueInnerState::Aborted) }
 }
 
 #[cfg(test)]
