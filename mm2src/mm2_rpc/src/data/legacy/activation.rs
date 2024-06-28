@@ -23,18 +23,3 @@ pub struct CoinInitResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mature_confirmations: Option<u32>,
 }
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-/// The priority of an electrum connection when selective policy is in effect.
-///
-/// Primary connections are considered first and only if all of them are faulty
-/// will the secondary connections be considered.
-pub enum Priority {
-    Primary,
-    Secondary,
-}
-
-impl Default for Priority {
-    fn default() -> Self { Priority::Secondary }
-}
