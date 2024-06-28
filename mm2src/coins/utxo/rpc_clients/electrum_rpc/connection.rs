@@ -475,13 +475,10 @@ impl ElectrumConnection {
                     loop {
                         match buf_reader.read_line(&mut buffer).await {
                             Ok(c) => {
-                                // FIXME: Why do we close the connection on EOF? Is that a signal from the server
-                                // that no more data will be sent over this connection?
                                 if c == 0 {
                                     break ElectrumConnectionErr::Temporary("EOF".to_string());
                                 }
                             },
-                            // FIXME: Fine grain the possible errors here, some of them might be irrecoverable?
                             Err(e) => {
                                 break ElectrumConnectionErr::Temporary(format!("Error on read {e:?}"));
                             },
