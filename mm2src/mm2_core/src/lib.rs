@@ -27,6 +27,10 @@ impl DbNamespaceId {
 
 #[derive(Clone, Debug, Deserialize, Display, Serialize)]
 #[serde(rename_all = "lowercase")]
+/// The Electrum selection policy to use. To be provided in the MM2 configuration.
+///
+/// Multiple: All connections are activated simultaneously.
+/// Selective: Only one connection is activated at a time (until it fails).
 pub enum ConnectionManagerPolicy {
     Multiple,
     Selective,
