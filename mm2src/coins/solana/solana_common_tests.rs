@@ -21,7 +21,7 @@ pub fn solana_net_to_url(net_type: SolanaNet) -> String {
     }
 }
 
-pub fn generate_key_pair_from_seed(seed: &str) -> Keypair {
+pub fn generate_key_pair_from_seed(seed: &str) -> SolKeypair {
     let derivation_path = DerivationPath::from_str("m/44'/501'/0'").unwrap();
     let seed = bip39_seed_from_passphrase(seed).unwrap();
 
@@ -38,7 +38,7 @@ pub fn generate_key_pair_from_seed(seed: &str) -> Keypair {
     solana_sdk::signature::keypair_from_seed(pair.to_bytes().as_ref()).unwrap()
 }
 
-pub fn generate_key_pair_from_iguana_seed(seed: String) -> Keypair {
+pub fn generate_key_pair_from_iguana_seed(seed: String) -> SolKeypair {
     let key_pair = key_pair_from_seed(seed.as_str()).unwrap();
     let secret_key = ed25519_dalek::SecretKey::from_bytes(key_pair.private().secret.as_slice()).unwrap();
     let public_key = ed25519_dalek::PublicKey::from(&secret_key);

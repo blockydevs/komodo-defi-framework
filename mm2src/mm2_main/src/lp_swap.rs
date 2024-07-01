@@ -1625,16 +1625,13 @@ pub async fn active_swaps_rpc(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>
 }
 
 /// Algorithm used to hash swap secret.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Default)]
 pub enum SecretHashAlgo {
     /// ripemd160(sha256(secret))
+    #[default]
     DHASH160 = 1,
     /// sha256(secret)
     SHA256 = 2,
-}
-
-impl Default for SecretHashAlgo {
-    fn default() -> Self { SecretHashAlgo::DHASH160 }
 }
 
 #[derive(Debug, Display)]
@@ -1671,8 +1668,12 @@ pub fn detect_secret_hash_algo(maker_coin: &MmCoinEnum, taker_coin: &MmCoinEnum)
         (MmCoinEnum::Tendermint(_) | MmCoinEnum::TendermintToken(_) | MmCoinEnum::LightningCoin(_), _) => {
             SecretHashAlgo::SHA256
         },
+        #[cfg(all(feature = "enable-solana", not(target_arch = "wasm32")))]
+        (MmCoinEnum::SolanaCoin(_), _) => SecretHashAlgo::SHA256,
         // If taker is lightning coin the SHA256 of the secret will be sent as part of the maker signed invoice
         (_, MmCoinEnum::Tendermint(_) | MmCoinEnum::TendermintToken(_)) => SecretHashAlgo::SHA256,
+        #[cfg(all(feature = "enable-solana", not(target_arch = "wasm32")))]
+        (_, MmCoinEnum::SolanaCoin(_)) => SecretHashAlgo::SHA256,
         (_, _) => SecretHashAlgo::DHASH160,
     }
 }

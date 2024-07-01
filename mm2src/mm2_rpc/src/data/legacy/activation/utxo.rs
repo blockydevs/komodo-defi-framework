@@ -13,8 +13,10 @@ pub struct UtxoMergeParams {
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 /// Deserializable Electrum protocol representation for RPC
+#[derive(Default)]
 pub enum ElectrumProtocol {
     /// TCP
+    #[default]
     TCP,
     /// SSL/TLS
     SSL,
@@ -25,16 +27,12 @@ pub enum ElectrumProtocol {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl Default for ElectrumProtocol {
-    fn default() -> Self { ElectrumProtocol::TCP }
-}
-
 #[cfg(target_arch = "wasm32")]
 impl Default for ElectrumProtocol {
     fn default() -> Self { ElectrumProtocol::WS }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 /// The priority of an electrum connection when selective policy is in effect.
 ///
@@ -42,9 +40,6 @@ impl Default for ElectrumProtocol {
 /// will the secondary connections be considered.
 pub enum Priority {
     Primary,
+    #[default]
     Secondary,
-}
-
-impl Default for Priority {
-    fn default() -> Self { Priority::Secondary }
 }

@@ -146,31 +146,25 @@ impl From<EnableCoinBalanceError> for EthActivationV2Error {
 }
 
 /// An alternative to `crate::PrivKeyActivationPolicy`, typical only for ETH coin.
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Default)]
 pub enum EthPrivKeyActivationPolicy {
+    #[default]
     ContextPrivKey,
     Trezor,
     #[cfg(target_arch = "wasm32")]
     Metamask,
 }
 
-impl Default for EthPrivKeyActivationPolicy {
-    fn default() -> Self { EthPrivKeyActivationPolicy::ContextPrivKey }
-}
-
 impl EthPrivKeyActivationPolicy {
     pub fn is_hw_policy(&self) -> bool { matches!(self, EthPrivKeyActivationPolicy::Trezor) }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, Default)]
 pub enum EthRpcMode {
+    #[default]
     Default,
     #[cfg(target_arch = "wasm32")]
     Metamask,
-}
-
-impl Default for EthRpcMode {
-    fn default() -> Self { EthRpcMode::Default }
 }
 
 #[derive(Clone, Deserialize)]

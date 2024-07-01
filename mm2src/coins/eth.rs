@@ -2165,13 +2165,10 @@ impl MarketCoinOps for EthCoin {
         let coin = self.clone();
 
         let fut = async move {
-            let result = coin
-                .send_raw_transaction(bytes.into())
+            coin.send_raw_transaction(bytes.into())
                 .await
                 .map(|res| format!("{:02x}", res))
-                .map_err(|e| ERRL!("{}", e));
-
-            result
+                .map_err(|e| ERRL!("{}", e))
         };
 
         Box::new(fut.boxed().compat())
@@ -2603,7 +2600,7 @@ async fn sign_raw_eth_tx(coin: &EthCoin, args: &SignEthTransactionParams) -> Raw
                 let gas_price = coin.get_gas_price().await?;
                 PayForGasOption::Legacy(LegacyGasPrice { gas_price })
             };
-            return sign_transaction_with_keypair(
+            sign_transaction_with_keypair(
                 coin,
                 key_pair,
                 value,
@@ -2617,7 +2614,7 @@ async fn sign_raw_eth_tx(coin: &EthCoin, args: &SignEthTransactionParams) -> Raw
             .map(|(signed_tx, _)| RawTransactionRes {
                 tx_hex: signed_tx.tx_hex().into(),
             })
-            .map_to_mm(|err| RawTransactionError::TransactionError(err.get_plain_text_format()));
+            .map_to_mm(|err| RawTransactionError::TransactionError(err.get_plain_text_format()))
         },
         #[cfg(target_arch = "wasm32")]
         EthPrivKeyPolicy::Metamask(_) => MmError::err(RawTransactionError::InvalidParam(
@@ -3602,11 +3599,9 @@ impl EthCoin {
                     U256::from(gas_limit::ETH_SEND_ERC20),
                 )
             },
-            EthCoinType::Nft { .. } => {
-                return Box::new(futures01::future::err(TransactionErr::ProtocolNotSupported(ERRL!(
-                    "Nft Protocol is not supported yet!"
-                ))))
-            },
+            EthCoinType::Nft { .. } => Box::new(futures01::future::err(TransactionErr::ProtocolNotSupported(ERRL!(
+                "Nft Protocol is not supported yet!"
+            )))),
         }
     }
 
@@ -3767,11 +3762,9 @@ impl EthCoin {
                     }
                 }))
             },
-            EthCoinType::Nft { .. } => {
-                return Box::new(futures01::future::err(TransactionErr::ProtocolNotSupported(ERRL!(
-                    "Nft Protocol is not supported yet!"
-                ))))
-            },
+            EthCoinType::Nft { .. } => Box::new(futures01::future::err(TransactionErr::ProtocolNotSupported(ERRL!(
+                "Nft Protocol is not supported yet!"
+            )))),
         }
     }
 
@@ -3888,11 +3881,9 @@ impl EthCoin {
                         }),
                 )
             },
-            EthCoinType::Nft { .. } => {
-                return Box::new(futures01::future::err(TransactionErr::ProtocolNotSupported(ERRL!(
-                    "Nft Protocol is not supported yet!"
-                ))))
-            },
+            EthCoinType::Nft { .. } => Box::new(futures01::future::err(TransactionErr::ProtocolNotSupported(ERRL!(
+                "Nft Protocol is not supported yet!"
+            )))),
         }
     }
 
@@ -4013,11 +4004,9 @@ impl EthCoin {
                         }),
                 )
             },
-            EthCoinType::Nft { .. } => {
-                return Box::new(futures01::future::err(TransactionErr::ProtocolNotSupported(ERRL!(
-                    "Nft Protocol is not supported yet!"
-                ))))
-            },
+            EthCoinType::Nft { .. } => Box::new(futures01::future::err(TransactionErr::ProtocolNotSupported(ERRL!(
+                "Nft Protocol is not supported yet!"
+            )))),
         }
     }
 
@@ -4138,11 +4127,9 @@ impl EthCoin {
                 .compat()
                 .await
             },
-            EthCoinType::Nft { .. } => {
-                return Err(TransactionErr::ProtocolNotSupported(ERRL!(
-                    "Nft Protocol is not supported!"
-                )))
-            },
+            EthCoinType::Nft { .. } => Err(TransactionErr::ProtocolNotSupported(ERRL!(
+                "Nft Protocol is not supported!"
+            ))),
         }
     }
 
@@ -4263,11 +4250,9 @@ impl EthCoin {
                 .compat()
                 .await
             },
-            EthCoinType::Nft { .. } => {
-                return Err(TransactionErr::ProtocolNotSupported(ERRL!(
-                    "Nft Protocol is not supported yet!"
-                )))
-            },
+            EthCoinType::Nft { .. } => Err(TransactionErr::ProtocolNotSupported(ERRL!(
+                "Nft Protocol is not supported yet!"
+            ))),
         }
     }
 

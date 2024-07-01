@@ -13,7 +13,8 @@ enable-solana = [
 	"dep:solana-sdk",
 	"dep:solana-transaction-status",
 	"dep:spl-token",
-	"dep:spl-associated-token-account"
+	"dep:spl-associated-token-account",
+	"dep:satomic-swap"
 ]
 enable-sia = [
 	"dep:reqwest",
@@ -92,6 +93,7 @@ rlp = { version = "0.5" }
 rmp-serde = "0.14.3"
 rpc = { path = "../mm2_bitcoin/rpc" }
 rpc_task = { path = "../rpc_task" }
+satomic-swap = { git = "https://github.com/KomodoPlatform/satomic-swap.git", rev = "413e472", optional = true }
 script = { path = "../mm2_bitcoin/script" }
 secp256k1 = { version = "0.20" }
 ser_error = { path = "../derives/ser_error" }

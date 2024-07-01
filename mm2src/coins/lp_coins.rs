@@ -21,8 +21,8 @@
 
 // `mockable` implementation uses these
 #![allow(
-    clippy::forget_ref,
-    clippy::forget_copy,
+    forgetting_references,
+    forgetting_copy_types,
     clippy::swap_ptr_to_ref,
     clippy::forget_non_drop
 )]
@@ -86,7 +86,6 @@ use std::time::Duration;
 use std::{fmt, iter};
 use utxo_signer::with_key_pair::UtxoSignWithKeyPairError;
 use zcash_primitives::transaction::Transaction as ZTransaction;
-
 cfg_native! {
     use crate::lightning::LightningCoin;
     use crate::lightning::ln_conf::PlatformCoinConfirmationTargets;
@@ -121,6 +120,29 @@ macro_rules! try_f {
         match $e {
             Ok(ok) => ok,
             Err(e) => return Box::new(futures01::future::err(e.into())),
+        }
+    };
+}
+
+#[cfg(feature = "enable-solana")]
+macro_rules! try_tx_fus_err {
+    ($err: expr) => {
+        return Box::new(futures01::future::err(crate::TransactionErr::Plain(ERRL!(
+            "{:?}", $err
+        ))))
+    };
+}
+
+#[cfg(feature = "enable-solana")]
+macro_rules! try_tx_fus_opt {
+    ($e: expr, $err: expr) => {
+        match $e {
+            Some(ok) => ok,
+            None => {
+                return Box::new(futures01::future::err(crate::TransactionErr::Plain(ERRL!(
+                    "{:?}", $err
+                ))))
+            },
         }
     };
 }
@@ -276,7 +298,7 @@ pub use solana::spl::SplToken;
     not(target_os = "android"),
     not(target_arch = "wasm32")
 ))]
-pub use solana::{SolanaActivationParams, SolanaCoin, SolanaFeeDetails};
+pub use solana::{SolTransaction, SolanaActivationParams, SolanaCoin, SolanaFeeDetails};
 
 pub mod utxo;
 use utxo::bch::{bch_coin_with_policy, BchActivationRequest, BchCoin};
@@ -607,6 +629,8 @@ pub trait Transaction: fmt::Debug + 'static {
 pub enum TransactionEnum {
     UtxoTx(UtxoTx),
     SignedEthTx(SignedEthTx),
+    #[cfg(all(feature = "enable-solana", not(target_arch = "wasm32")))]
+    SolTransaction(SolTransaction),
     ZTransaction(ZTransaction),
     CosmosTransaction(CosmosTransaction),
     #[cfg(not(target_arch = "wasm32"))]
@@ -615,6 +639,8 @@ pub enum TransactionEnum {
 
 ifrom!(TransactionEnum, UtxoTx);
 ifrom!(TransactionEnum, SignedEthTx);
+#[cfg(all(feature = "enable-solana", not(target_arch = "wasm32")))]
+ifrom!(TransactionEnum, SolTransaction);
 ifrom!(TransactionEnum, ZTransaction);
 #[cfg(not(target_arch = "wasm32"))]
 ifrom!(TransactionEnum, LightningPayment);
@@ -638,6 +664,8 @@ impl Deref for TransactionEnum {
             TransactionEnum::CosmosTransaction(ref t) => t,
             #[cfg(not(target_arch = "wasm32"))]
             TransactionEnum::LightningPayment(ref p) => p,
+            #[cfg(all(feature = "enable-solana", not(target_arch = "wasm32")))]
+            TransactionEnum::SolTransaction(ref s) => s,
         }
     }
 }
@@ -2406,17 +2434,14 @@ pub enum TradePreimageValue {
     UpperBound(BigDecimal),
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub enum SwapTxFeePolicy {
+    #[default]
     Unsupported,
     Internal,
     Low,
     Medium,
     High,
-}
-
-impl Default for SwapTxFeePolicy {
-    fn default() -> Self { SwapTxFeePolicy::Unsupported }
 }
 
 #[derive(Debug, Deserialize)]
@@ -3812,14 +3837,11 @@ impl CoinsContext {
 }
 
 /// This enum is used in coin activation requests.
-#[derive(Copy, Clone, Debug, Deserialize, Serialize)]
+#[derive(Copy, Clone, Debug, Deserialize, Serialize, Default)]
 pub enum PrivKeyActivationPolicy {
+    #[default]
     ContextPrivKey,
     Trezor,
-}
-
-impl Default for PrivKeyActivationPolicy {
-    fn default() -> Self { PrivKeyActivationPolicy::ContextPrivKey }
 }
 
 impl PrivKeyActivationPolicy {
@@ -4859,7 +4881,7 @@ pub async fn my_tx_history(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, S
 }
 
 /// `get_trade_fee` rpc implementation.
-/// There is some consideration about this rpc:  
+/// There is some consideration about this rpc:
 /// for eth coin this rpc returns max possible trade fee (estimated for maximum possible gas limit for any kind of swap).
 /// However for eth coin, as part of fixing this issue https://github.com/KomodoPlatform/komodo-defi-framework/issues/1848,
 /// `max_taker_vol' and `trade_preimage` rpc now return more accurate required gas calculations.
@@ -5445,7 +5467,6 @@ where
 
                 // First, derive all empty addresses and put it into `balances` with default balance.
                 let address_ids = (last_non_empty_address_id..checking_address_id)
-                    .into_iter()
                     .map(|address_id| HDAddressId { chain, address_id });
                 let empty_addresses =
                     coin.derive_addresses(hd_account, address_ids)

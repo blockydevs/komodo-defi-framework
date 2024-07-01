@@ -6,16 +6,13 @@ pub mod data_asker;
 pub mod event_dispatcher;
 pub mod mm_ctx;
 
-#[derive(Clone, Copy, Display, PartialEq)]
+#[derive(Clone, Copy, Display, PartialEq, Default)]
 pub enum DbNamespaceId {
     #[display(fmt = "MAIN")]
+    #[default]
     Main,
     #[display(fmt = "TEST_{}", _0)]
     Test(u64),
-}
-
-impl Default for DbNamespaceId {
-    fn default() -> Self { DbNamespaceId::Main }
 }
 
 impl DbNamespaceId {
@@ -25,7 +22,7 @@ impl DbNamespaceId {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Display, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Display, Serialize)]
 #[serde(rename_all = "lowercase")]
 /// The Electrum selection policy to use. To be provided in the MM2 configuration.
 ///
@@ -33,9 +30,6 @@ impl DbNamespaceId {
 /// Selective: Only one connection is activated at a time (until it fails).
 pub enum ConnectionManagerPolicy {
     Multiple,
+    #[default]
     Selective,
-}
-
-impl Default for ConnectionManagerPolicy {
-    fn default() -> Self { ConnectionManagerPolicy::Selective }
 }
