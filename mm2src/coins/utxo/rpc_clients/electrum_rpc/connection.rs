@@ -523,8 +523,6 @@ impl ElectrumConnection {
                 if was_already_connected {
                     // Gracefully return if some other thread is already connected using `connection`.
                     // Up until this point, we didn't alter `connection` in any way.
-                    // Note that the other active connection is the one which will reply to the version querying
-                    // and we will still exit `establish_connection_loop` without any errors.
                     return;
                 }
 
@@ -784,8 +782,6 @@ impl ElectrumConnection {
                 if was_already_connected {
                     // Gracefully return if some other thread is already connected using `connection`.
                     // Up until this point, we didn't alter `connection` in any way.
-                    // Note that the other active connection is the one which will reply to the version querying
-                    // and we will still exit `establish_connection_loop` without any errors.
                     return;
                 }
                 event_handlers.on_connected(&address).ok();
