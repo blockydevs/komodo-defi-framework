@@ -249,13 +249,19 @@ impl ElectrumConnection {
     /// Process an incoming JSONRPC response from the electrum server.
     async fn process_electrum_response(
         &self,
-        raw_json: Json,
+        bytes: &[u8],
         event_handlers: &Vec<Box<SharableRpcTransportEventHandler>>,
     ) {
         // Inform the event handlers.
-        if let Ok(ref data) = json::to_vec(&raw_json) {
-            event_handlers.on_incoming_response(data);
-        }
+        event_handlers.on_incoming_response(bytes);
+
+        let raw_json: Json = match json::from_slice(bytes) {
+            Ok(json) => json,
+            Err(e) => {
+                error!("{}", e);
+                return;
+            },
+        };
 
         // detect if we got standard JSONRPC response or subscription response as JSONRPC request
         #[derive(Deserialize)]
@@ -323,14 +329,7 @@ impl ElectrumConnection {
         for response in responses {
             // `split` returns empty slice if it ends with separator which is our case.
             if !response.is_empty() {
-                let raw_json: Json = match json::from_slice(response) {
-                    Ok(json) => json,
-                    Err(e) => {
-                        error!("{}", e);
-                        return;
-                    },
-                };
-                self.process_electrum_response(raw_json, event_handlers).await
+                self.process_electrum_response(response, event_handlers).await
             }
         }
     }
@@ -725,14 +724,11 @@ impl ElectrumConnection {
                 let connection = connection.clone();
                 let event_handlers = event_handlers.clone();
                 async move {
-                    // FIXME: `process_electrum_response` would be better off receiving bytes and not raw json,
-                    // this is to avoid converting the json back to bytes to pass to the event handlers. Check if
-                    // this is possible.
                     while let Some(response) = transport_rx.next().await {
                         match response {
-                            Ok(raw_json) => {
+                            Ok(bytes) => {
                                 last_response.store(now_ms(), AtomicOrdering::Relaxed);
-                                connection.process_electrum_response(raw_json, &event_handlers).await;
+                                connection.process_electrum_response(&bytes, &event_handlers).await;
                             },
                             Err(e) => {
                                 error!("{address} error: {e:?}");
@@ -751,20 +747,9 @@ impl ElectrumConnection {
                 let mut rx = rx_to_stream(rx).compat();
                 async move {
                     while let Some(Ok(bytes)) = rx.next().await {
-                        // FIXME: Also here we don't need to convert the bytes to json.
-                        // That's too early considering it will be send over the network.
-                        // Fix `transport_tx.send` so that it accepts bytes instead.
-                        let raw_json: Json = match json::from_slice(&bytes) {
-                            Ok(raw_json) => raw_json,
-                            Err(e) => {
-                                error!("{address} error: {e:?} deserializing the outgoing data: {bytes:?}");
-                                continue;
-                            },
-                        };
                         event_handlers.on_outgoing_request(&bytes);
-
-                        if let Err(e) = transport_tx.send(raw_json).await {
-                            error!("{address} error: {e:?} sending data {bytes:?}");
+                        if let Err(e) = transport_tx.send(bytes).await {
+                            error!("{address} error: {e:?} sending data");
                         }
                     }
                     ElectrumConnectionErr::Temporary("Sender disconnected".to_string())
