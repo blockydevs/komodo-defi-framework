@@ -1,6 +1,5 @@
 use derive_more::Display;
 use rand::{thread_rng, Rng};
-use serde::{Deserialize, Serialize};
 
 pub mod data_asker;
 pub mod event_dispatcher;
@@ -20,16 +19,4 @@ impl DbNamespaceId {
         let mut rng = thread_rng();
         DbNamespaceId::Test(rng.gen())
     }
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Display, Serialize)]
-#[serde(rename_all = "lowercase")]
-/// The Electrum selection policy to use. To be provided in the MM2 configuration.
-///
-/// Multiple: All connections are activated simultaneously.
-/// Selective: Only one connection is activated at a time (until it fails).
-pub enum ConnectionManagerPolicy {
-    Multiple,
-    #[default]
-    Selective,
 }

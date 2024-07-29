@@ -1844,7 +1844,7 @@ mod lp_swap_tests {
     use coins::hd_wallet::HDPathAccountToAddressId;
     use coins::utxo::rpc_clients::ElectrumConnectionSettings;
     use coins::utxo::utxo_standard::utxo_standard_coin_with_priv_key;
-    use coins::utxo::{UtxoActivationParams, UtxoRpcMode};
+    use coins::utxo::{ElectrumManagerPolicy, UtxoActivationParams, UtxoRpcMode};
     use coins::MarketCoinOps;
     use coins::PrivKeyActivationPolicy;
     use common::{block_on, new_uuid};
@@ -2233,6 +2233,7 @@ mod lp_swap_tests {
                         timeout_sec: None,
                     })
                     .collect(),
+                policy: ElectrumManagerPolicy::Multiple,
             },
             utxo_merge_params: None,
             tx_history: false,

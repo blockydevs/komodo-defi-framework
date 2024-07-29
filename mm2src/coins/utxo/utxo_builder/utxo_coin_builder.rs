@@ -5,9 +5,9 @@ use crate::utxo::rpc_clients::{ElectrumClient, ElectrumClientSettings, ElectrumC
 use crate::utxo::tx_cache::{UtxoVerboseCacheOps, UtxoVerboseCacheShared};
 use crate::utxo::utxo_block_header_storage::BlockHeaderStorage;
 use crate::utxo::utxo_builder::utxo_conf_builder::{UtxoConfBuilder, UtxoConfError};
-use crate::utxo::{output_script, ElectrumBuilderArgs, RecentlySpentOutPoints, ScripthashNotification,
-                  ScripthashNotificationSender, TxFee, UtxoCoinConf, UtxoCoinFields, UtxoHDWallet, UtxoRpcMode,
-                  UtxoSyncStatus, UtxoSyncStatusLoopHandle, UTXO_DUST_AMOUNT};
+use crate::utxo::{output_script, ElectrumBuilderArgs, ElectrumManagerPolicy, RecentlySpentOutPoints,
+                  ScripthashNotification, ScripthashNotificationSender, TxFee, UtxoCoinConf, UtxoCoinFields,
+                  UtxoHDWallet, UtxoRpcMode, UtxoSyncStatus, UtxoSyncStatusLoopHandle, UTXO_DUST_AMOUNT};
 use crate::{BlockchainNetwork, CoinTransportMetrics, DerivationMethod, HistorySyncState, IguanaPrivKey,
             PrivKeyBuildPolicy, PrivKeyPolicy, PrivKeyPolicyNotAllowed, RpcClientType,
             SharableRpcTransportEventHandler, UtxoActivationParams};
@@ -549,12 +549,13 @@ pub trait UtxoCoinBuilderCommonOps {
                     Ok(UtxoRpcClientEnum::Native(native))
                 }
             },
-            UtxoRpcMode::Electrum { servers } => {
+            UtxoRpcMode::Electrum { servers, policy } => {
                 let electrum = self
                     .electrum_client(
                         abortable_system,
                         ElectrumBuilderArgs::default(),
                         servers,
+                        policy,
                         scripthash_notification_sender,
                     )
                     .await?;
@@ -570,6 +571,7 @@ pub trait UtxoCoinBuilderCommonOps {
         abortable_system: AbortableQueue,
         args: ElectrumBuilderArgs,
         servers: Vec<ElectrumConnectionSettings>,
+        policy: ElectrumManagerPolicy,
         scripthash_notification_sender: ScripthashNotificationSender,
     ) -> UtxoCoinBuildResult<ElectrumClient> {
         let coin_ticker = self.ticker().to_owned();
@@ -598,7 +600,7 @@ pub trait UtxoCoinBuilderCommonOps {
             coin_ticker,
             spawn_ping: args.spawn_ping,
             negotiate_version: args.negotiate_version,
-            connection_manager_policy: ctx.electrum_connection_manager_policy(),
+            connection_manager_policy: policy,
         };
 
         ElectrumClient::try_new(

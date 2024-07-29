@@ -43,7 +43,6 @@ use futures::future::join_all;
 use futures::TryFutureExt;
 use keys::prefixes::*;
 use mm2_core::mm_ctx::MmCtxBuilder;
-use mm2_core::ConnectionManagerPolicy;
 use mm2_number::bigdecimal::{BigDecimal, Signed};
 use mm2_test_helpers::electrums::doc_electrums;
 use mm2_test_helpers::for_tests::{electrum_servers_rpc, mm_ctx_with_custom_db, DOC_ELECTRUM_ADDRS,
@@ -87,7 +86,7 @@ pub fn electrum_client_for_test(servers: &[&str]) -> ElectrumClient {
 
     let servers = servers.into_iter().map(|s| json::from_value(s).unwrap()).collect();
     let abortable_system = AbortableQueue::default();
-    block_on(builder.electrum_client(abortable_system, args, servers, None)).unwrap()
+    block_on(builder.electrum_client(abortable_system, args, servers, ElectrumManagerPolicy::Multiple, None)).unwrap()
 }
 
 /// Returned client won't work by default, requires some mocks to be usable
@@ -478,7 +477,7 @@ fn test_wait_for_payment_spend_timeout_electrum() {
         coin_ticker: TEST_COIN_NAME.into(),
         spawn_ping: true,
         negotiate_version: true,
-        connection_manager_policy: ConnectionManagerPolicy::default(),
+        connection_manager_policy: ElectrumManagerPolicy::Multiple,
     };
     let client = block_on(ElectrumClient::try_new(
         client_settings,

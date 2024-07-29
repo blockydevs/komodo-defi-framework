@@ -9,8 +9,8 @@ use super::rpc_responses::*;
 
 use crate::utxo::rpc_clients::ConcurrentRequestMap;
 use crate::utxo::utxo_block_header_storage::BlockHeaderStorage;
-use crate::utxo::{output_script, output_script_p2pk, GetBlockHeaderError, GetConfirmedTxError, GetTxHeightError,
-                  ScripthashNotification};
+use crate::utxo::{output_script, output_script_p2pk, ElectrumManagerPolicy, GetBlockHeaderError, GetConfirmedTxError,
+                  GetTxHeightError, ScripthashNotification};
 use crate::SharableRpcTransportEventHandler;
 use chain::{BlockHeader, Transaction as UtxoTx, TxHashAlgo};
 use common::executor::abortable_queue::{AbortableQueue, WeakSpawner};
@@ -21,7 +21,6 @@ use common::log::error;
 use common::{median, OrdRange};
 use keys::hash::H256;
 use keys::Address;
-use mm2_core::ConnectionManagerPolicy;
 use mm2_err_handle::prelude::*;
 use mm2_number::BigDecimal;
 #[cfg(test)] use mocktopus::macros::*;
@@ -60,7 +59,7 @@ pub struct ElectrumClientSettings {
     pub coin_ticker: String,
     pub negotiate_version: bool,
     pub spawn_ping: bool,
-    pub connection_manager_policy: ConnectionManagerPolicy,
+    pub connection_manager_policy: ElectrumManagerPolicy,
 }
 
 #[derive(Debug)]
@@ -100,12 +99,12 @@ impl ElectrumClientImpl {
         }
 
         let connection_manager: Box<dyn ConnectionManagerTrait> = match client_settings.connection_manager_policy {
-            ConnectionManagerPolicy::Selective => Box::new(ConnectionManagerSelective::try_new_arc(
+            ElectrumManagerPolicy::Selective => Box::new(ConnectionManagerSelective::try_new_arc(
                 client_settings.servers,
                 client_settings.spawn_ping,
                 &abortable_system,
             )?),
-            ConnectionManagerPolicy::Multiple => Box::new(ConnectionManagerMultiple::try_new_arc(
+            ElectrumManagerPolicy::Multiple => Box::new(ConnectionManagerMultiple::try_new_arc(
                 client_settings.servers,
                 client_settings.spawn_ping,
                 &abortable_system,
@@ -294,9 +293,9 @@ impl ElectrumClient {
 
     /// Sends a JSONRPC request to all the connected servers.
     ///
-    /// A client with `ConnectionManagerPolicy::Multiple` will send the request to all active connected servers,
+    /// A client with `ElectrumManagerPolicy::Multiple` will send the request to all active connected servers,
     /// which are *all* the servers if non of them is erroring (timeout, version mismatch, etc).
-    /// A client with `ConnectionManagerPolicy::Selective` will send the request to the currently selected active server.
+    /// A client with `ElectrumManagerPolicy::Selective` will send the request to the currently selected active server.
     async fn electrum_request_multi(
         self,
         request: JsonRpcRequestEnum,

@@ -1422,6 +1422,7 @@ pub struct UtxoActivationParams {
 pub enum UtxoFromLegacyReqErr {
     UnexpectedMethod,
     InvalidElectrumServers(json::Error),
+    InvalidElectrumManagerPolicy(json::Error),
     InvalidMergeParams(json::Error),
     InvalidBlockHeaderVerificationParams(json::Error),
     InvalidRequiredConfs(json::Error),
@@ -1442,7 +1443,14 @@ impl UtxoActivationParams {
             Some("electrum") => {
                 let servers =
                     json::from_value(req["servers"].clone()).map_to_mm(UtxoFromLegacyReqErr::InvalidElectrumServers)?;
-                UtxoRpcMode::Electrum { servers }
+                let policy = if req["policy"].is_null() {
+                    ElectrumManagerPolicy::Multiple
+                } else {
+                    json::from_value(req["policy"].clone())
+                        .map_to_mm(UtxoFromLegacyReqErr::InvalidElectrumManagerPolicy)?
+                };
+
+                UtxoRpcMode::Electrum { servers, policy }
             },
             _ => return MmError::err(UtxoFromLegacyReqErr::UnexpectedMethod),
         };
@@ -1490,11 +1498,26 @@ impl UtxoActivationParams {
     }
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Display, Serialize)]
+#[serde(rename_all = "lowercase")]
+/// The Electrum selection policy to use.
+///
+/// Multiple: All connections are activated simultaneously.
+/// Selective: Only one connection is activated at a time (until it fails).
+pub enum ElectrumManagerPolicy {
+    #[default]
+    Multiple,
+    Selective,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "rpc", content = "rpc_data")]
 pub enum UtxoRpcMode {
     Native,
-    Electrum { servers: Vec<ElectrumConnectionSettings> },
+    Electrum {
+        servers: Vec<ElectrumConnectionSettings>,
+        policy: ElectrumManagerPolicy,
+    },
 }
 
 impl UtxoRpcMode {
