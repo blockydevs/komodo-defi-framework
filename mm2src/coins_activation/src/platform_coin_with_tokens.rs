@@ -101,7 +101,7 @@ pub enum InitTokensAsMmCoinsError {
         ticker: String,
         protocol: CoinProtocol,
     },
-    ProtocolMissMatch {
+    ProtocolMismatch {
         ticker: String,
         from_config: CoinProtocol,
         from_request: CoinProtocol,
@@ -124,11 +124,11 @@ impl From<CoinConfWithProtocolError> for InitTokensAsMmCoinsError {
                 InitTokensAsMmCoinsError::UnexpectedTokenProtocol { ticker, protocol }
             },
 
-            CoinConfWithProtocolError::ProtocolMissMatch {
+            CoinConfWithProtocolError::ProtocolMismatch {
                 ticker,
                 from_config,
                 from_request,
-            } => InitTokensAsMmCoinsError::ProtocolMissMatch {
+            } => InitTokensAsMmCoinsError::ProtocolMismatch {
                 ticker,
                 from_config,
                 from_request,
@@ -288,7 +288,7 @@ pub enum EnablePlatformCoinWithTokensError {
         from_config,
         from_request
     )]
-    ProtocolMissMatch {
+    ProtocolMismatch {
         ticker: String,
         from_config: CoinProtocol,
         from_request: CoinProtocol,
@@ -333,11 +333,11 @@ impl From<CoinConfWithProtocolError> for EnablePlatformCoinWithTokensError {
                     error: err.to_string(),
                 }
             },
-            CoinConfWithProtocolError::ProtocolMissMatch {
+            CoinConfWithProtocolError::ProtocolMismatch {
                 ticker,
                 from_config,
                 from_request,
-            } => EnablePlatformCoinWithTokensError::ProtocolMissMatch {
+            } => EnablePlatformCoinWithTokensError::ProtocolMismatch {
                 ticker,
                 from_config,
                 from_request,
@@ -369,11 +369,11 @@ impl From<InitTokensAsMmCoinsError> for EnablePlatformCoinWithTokensError {
             InitTokensAsMmCoinsError::UnexpectedDerivationMethod(e) => {
                 EnablePlatformCoinWithTokensError::UnexpectedDerivationMethod(e.to_string())
             },
-            InitTokensAsMmCoinsError::ProtocolMissMatch {
+            InitTokensAsMmCoinsError::ProtocolMismatch {
                 ticker,
                 from_config,
                 from_request,
-            } => EnablePlatformCoinWithTokensError::ProtocolMissMatch {
+            } => EnablePlatformCoinWithTokensError::ProtocolMismatch {
                 ticker,
                 from_config,
                 from_request,
@@ -425,7 +425,7 @@ impl HttpStatusCode for EnablePlatformCoinWithTokensError {
             | EnablePlatformCoinWithTokensError::UnexpectedDeviceActivationPolicy
             | EnablePlatformCoinWithTokensError::FailedSpawningBalanceEvents(_)
             | EnablePlatformCoinWithTokensError::UnexpectedTokenProtocol { .. }
-            | EnablePlatformCoinWithTokensError::ProtocolMissMatch { .. } => StatusCode::BAD_REQUEST,
+            | EnablePlatformCoinWithTokensError::ProtocolMismatch { .. } => StatusCode::BAD_REQUEST,
             EnablePlatformCoinWithTokensError::Transport(_) => StatusCode::BAD_GATEWAY,
         }
     }

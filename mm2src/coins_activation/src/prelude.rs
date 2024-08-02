@@ -73,7 +73,7 @@ pub enum CoinConfWithProtocolError {
         ticker: String,
         protocol: CoinProtocol,
     },
-    ProtocolMissMatch {
+    ProtocolMismatch {
         ticker: String,
         from_config: CoinProtocol,
         from_request: CoinProtocol,
@@ -103,7 +103,7 @@ pub fn coin_conf_with_protocol<T: TryFromCoinProtocol>(
                 Ok(protocol_from_config) => {
                     if let Some(protocol_from_request) = protocol_from_request {
                         if protocol_from_request != protocol_from_config {
-                            return MmError::err(CoinConfWithProtocolError::ProtocolMissMatch {
+                            return MmError::err(CoinConfWithProtocolError::ProtocolMismatch {
                                 ticker: coin.into(),
                                 from_config: protocol_from_config,
                                 from_request: protocol_from_request,

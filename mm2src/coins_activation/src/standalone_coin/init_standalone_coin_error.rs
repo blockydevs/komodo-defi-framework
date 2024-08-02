@@ -51,7 +51,7 @@ impl From<CoinConfWithProtocolError> for InitStandaloneCoinError {
             CoinConfWithProtocolError::UnexpectedProtocol { ticker, protocol } => {
                 InitStandaloneCoinError::UnexpectedCoinProtocol { ticker, protocol }
             },
-            CoinConfWithProtocolError::ProtocolMissMatch { ticker, .. } => {
+            CoinConfWithProtocolError::ProtocolMismatch { ticker, .. } => {
                 InitStandaloneCoinError::Internal(format!("Protocol from request is not supported for {}", ticker))
             },
         }

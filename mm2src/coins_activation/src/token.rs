@@ -55,7 +55,7 @@ pub enum EnableTokenError {
         from_config,
         from_request
     )]
-    ProtocolMissMatch {
+    ProtocolMismatch {
         ticker: String,
         from_config: CoinProtocol,
         from_request: CoinProtocol,
@@ -99,11 +99,11 @@ impl From<CoinConfWithProtocolError> for EnableTokenError {
             CoinConfWithProtocolError::UnexpectedProtocol { ticker, protocol } => {
                 EnableTokenError::UnexpectedTokenProtocol { ticker, protocol }
             },
-            CoinConfWithProtocolError::ProtocolMissMatch {
+            CoinConfWithProtocolError::ProtocolMismatch {
                 ticker,
                 from_config,
                 from_request,
-            } => EnableTokenError::ProtocolMissMatch {
+            } => EnableTokenError::ProtocolMismatch {
                 ticker,
                 from_config,
                 from_request,
@@ -187,7 +187,7 @@ impl HttpStatusCode for EnableTokenError {
             | EnableTokenError::TokenConfigIsNotFound { .. }
             | EnableTokenError::UnexpectedTokenProtocol { .. }
             | EnableTokenError::InvalidPayload(_)
-            | EnableTokenError::ProtocolMissMatch { .. } => StatusCode::BAD_REQUEST,
+            | EnableTokenError::ProtocolMismatch { .. } => StatusCode::BAD_REQUEST,
             EnableTokenError::TokenProtocolParseError { .. }
             | EnableTokenError::UnsupportedPlatformCoin { .. }
             | EnableTokenError::UnexpectedDerivationMethod(_)

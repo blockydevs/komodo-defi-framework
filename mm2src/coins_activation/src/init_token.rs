@@ -308,7 +308,7 @@ pub enum InitTokenError {
         from_config,
         from_request
     )]
-    ProtocolMissMatch {
+    ProtocolMismatch {
         ticker: String,
         from_config: CoinProtocol,
         from_request: CoinProtocol,
@@ -345,11 +345,11 @@ impl From<CoinConfWithProtocolError> for InitTokenError {
             CoinConfWithProtocolError::UnexpectedProtocol { ticker, protocol } => {
                 InitTokenError::UnexpectedTokenProtocol { ticker, protocol }
             },
-            CoinConfWithProtocolError::ProtocolMissMatch {
+            CoinConfWithProtocolError::ProtocolMismatch {
                 ticker,
                 from_config,
                 from_request,
-            } => InitTokenError::ProtocolMissMatch {
+            } => InitTokenError::ProtocolMismatch {
                 ticker,
                 from_config,
                 from_request,
@@ -376,7 +376,7 @@ impl HttpStatusCode for InitTokenError {
             | InitTokenError::TokenConfigIsNotFound { .. }
             | InitTokenError::TokenProtocolParseError { .. }
             | InitTokenError::UnexpectedTokenProtocol { .. }
-            | InitTokenError::ProtocolMissMatch { .. }
+            | InitTokenError::ProtocolMismatch { .. }
             | InitTokenError::TokenCreationError { .. }
             | InitTokenError::PlatformCoinIsNotActivated(_) => StatusCode::BAD_REQUEST,
             InitTokenError::TaskTimedOut { .. } => StatusCode::REQUEST_TIMEOUT,
