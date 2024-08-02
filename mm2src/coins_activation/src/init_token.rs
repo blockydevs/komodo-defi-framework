@@ -19,6 +19,7 @@ use rpc_task::{RpcTask, RpcTaskError, RpcTaskHandleShared, RpcTaskManager, RpcTa
                RpcTaskTypes, TaskId};
 use ser_error_derive::SerializeErrorType;
 use serde_derive::{Deserialize, Serialize};
+use serde_json::Value as Json;
 use std::time::Duration;
 
 pub type InitTokenResponse = InitRpcTaskResponse;
@@ -66,6 +67,7 @@ pub trait InitTokenActivationOps: Into<MmCoinEnum> + TokenOf + Clone + Send + Sy
         ticker: String,
         platform_coin: Self::PlatformCoin,
         activation_request: &Self::ActivationRequest,
+        token_conf: Json,
         protocol_conf: Self::ProtocolInfo,
         task_handle: InitTokenTaskHandleShared<Self>,
     ) -> Result<Self, MmError<Self::ActivationError>>;
@@ -96,7 +98,7 @@ where
         return MmError::err(InitTokenError::TokenIsAlreadyActivated { ticker: request.ticker });
     }
 
-    let (_, token_protocol): (_, Token::ProtocolInfo) =
+    let (token_conf, token_protocol): (_, Token::ProtocolInfo) =
         coin_conf_with_protocol(&ctx, &request.ticker, request.protocol.clone())?;
 
     let platform_coin = lp_coinfind_or_err(&ctx, token_protocol.platform_coin_ticker())
@@ -114,6 +116,7 @@ where
     let task = InitTokenTask::<Token> {
         ctx,
         request,
+        token_conf,
         token_protocol,
         platform_coin,
     };
@@ -177,6 +180,7 @@ pub async fn cancel_init_token<Standalone: InitTokenActivationOps>(
 pub struct InitTokenTask<Token: InitTokenActivationOps> {
     ctx: MmArc,
     request: InitTokenReq<Token::ActivationRequest>,
+    token_conf: Json,
     token_protocol: Token::ProtocolInfo,
     platform_coin: Token::PlatformCoin,
 }
@@ -213,6 +217,7 @@ where
             ticker.clone(),
             self.platform_coin.clone(),
             &self.request.activation_params,
+            self.token_conf.clone(),
             self.token_protocol.clone(),
             task_handle.clone(),
         )

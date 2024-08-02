@@ -12,6 +12,7 @@ use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
 use ser_error_derive::SerializeErrorType;
 use serde_derive::{Deserialize, Serialize};
+use serde_json::Value as Json;
 
 pub trait TokenProtocolParams {
     fn platform_coin_ticker(&self) -> &str;
@@ -28,6 +29,7 @@ pub trait TokenActivationOps: Into<MmCoinEnum> + platform_coin_with_tokens::Toke
         ticker: String,
         platform_coin: Self::PlatformCoin,
         activation_params: Self::ActivationParams,
+        token_conf: Json,
         protocol_conf: Self::ProtocolInfo,
     ) -> Result<(Self, Self::ActivationResult), MmError<Self::ActivationError>>;
 }
@@ -142,7 +144,7 @@ where
         return MmError::err(EnableTokenError::TokenIsAlreadyActivated(req.ticker));
     }
 
-    let (_, token_protocol): (_, Token::ProtocolInfo) =
+    let (token_conf, token_protocol): (_, Token::ProtocolInfo) =
         coin_conf_with_protocol(&ctx, &req.ticker, req.protocol.clone())?;
 
     let platform_coin = lp_coinfind_or_err(&ctx, token_protocol.platform_coin_ticker())
@@ -156,8 +158,14 @@ where
         }
     })?;
 
-    let (token, activation_result) =
-        Token::enable_token(req.ticker, platform_coin.clone(), req.activation_params, token_protocol).await?;
+    let (token, activation_result) = Token::enable_token(
+        req.ticker,
+        platform_coin.clone(),
+        req.activation_params,
+        token_conf,
+        token_protocol,
+    )
+    .await?;
 
     let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
     coins_ctx.add_token(token.clone().into()).await?;
