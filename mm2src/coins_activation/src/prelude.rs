@@ -1,4 +1,3 @@
-use coins::nft::nft_structs::{Chain, ConvertChain};
 #[cfg(feature = "enable-sia")]
 use coins::sia::SiaCoinActivationParams;
 use coins::utxo::UtxoActivationParams;
@@ -81,63 +80,50 @@ pub enum CoinConfWithProtocolError {
 }
 
 /// Determines the coin configuration and protocol information for a given coin or NFT ticker.
-/// In the case of NFT ticker, it's platform coin config will be returned.
 #[allow(clippy::result_large_err)]
 pub fn coin_conf_with_protocol<T: TryFromCoinProtocol>(
     ctx: &MmArc,
     coin: &str,
     protocol_from_request: Option<CoinProtocol>,
 ) -> Result<(Json, T), MmError<CoinConfWithProtocolError>> {
-    let (conf, coin_protocol) = match Chain::from_nft_ticker(coin) {
-        Ok(chain) => {
-            let platform = chain.to_ticker();
-            let platform_conf = coin_conf(ctx, platform);
-            let nft_protocol = CoinProtocol::NFT {
-                platform: platform.to_string(),
-            };
-            (platform_conf, nft_protocol)
-        },
-        Err(_) => {
-            let mut conf = coin_conf(ctx, coin);
-            let coin_protocol: CoinProtocol = match json::from_value(conf["protocol"].clone()) {
-                Ok(protocol_from_config) => {
-                    if let Some(protocol_from_request) = protocol_from_request {
-                        if protocol_from_request != protocol_from_config {
-                            return MmError::err(CoinConfWithProtocolError::ProtocolMismatch {
-                                ticker: coin.into(),
-                                from_config: protocol_from_config,
-                                from_request: protocol_from_request,
-                            });
-                        }
-                    }
-                    protocol_from_config
-                },
-                Err(err) => {
-                    let protocol_from_request =
-                        protocol_from_request.ok_or_else(|| CoinConfWithProtocolError::CoinProtocolParseError {
-                            ticker: coin.into(),
-                            err,
-                        })?;
-                    // Todo: Remove this once order matching using contract instead of ticker is implemented
-                    conf["wallet_only"] = json::Value::Bool(true);
-                    protocol_from_request
-                },
-            };
-            drop_mutability!(conf);
-            (conf, coin_protocol)
-        },
+    let mut conf = coin_conf(ctx, coin);
+    let coin_protocol = if conf.is_null() {
+        // This means it's a custom token, and we should use protocol from request if it's not None
+        let protocol_from_request =
+            protocol_from_request.ok_or_else(|| CoinConfWithProtocolError::ConfigIsNotFound(coin.into()))?;
+        conf = json::json!({
+            "protocol": protocol_from_request,
+            "wallet_only": true
+        });
+        protocol_from_request
+    } else {
+        let protocol_from_config = json::from_value(conf["protocol"].clone()).map_to_mm(|err| {
+            CoinConfWithProtocolError::CoinProtocolParseError {
+                ticker: coin.into(),
+                err,
+            }
+        })?;
+
+        if let Some(protocol_from_request) = protocol_from_request {
+            if protocol_from_request != protocol_from_config {
+                return MmError::err(CoinConfWithProtocolError::ProtocolMismatch {
+                    ticker: coin.into(),
+                    from_config: protocol_from_config,
+                    from_request: protocol_from_request,
+                });
+            }
+        }
+
+        protocol_from_config
     };
+    drop_mutability!(conf);
 
-    if conf.is_null() {
-        return MmError::err(CoinConfWithProtocolError::ConfigIsNotFound(coin.into()));
-    }
-
-    let protocol =
+    let coin_protocol =
         T::try_from_coin_protocol(coin_protocol).mm_err(|protocol| CoinConfWithProtocolError::UnexpectedProtocol {
             ticker: coin.into(),
             protocol,
         })?;
-    Ok((conf, protocol))
+    Ok((conf, coin_protocol))
 }
 
 /// A trait to be implemented for coin activation requests to determine some information about the request.
