@@ -112,18 +112,15 @@ pub fn coin_conf_with_protocol<T: TryFromCoinProtocol>(
                     }
                     protocol_from_config
                 },
-                Err(err) => match protocol_from_request {
-                    Some(protocol_from_request) => {
-                        // Todo: Remove this once order matching using contract instead of ticker is implemented
-                        conf["wallet_only"] = json::Value::Bool(true);
-                        protocol_from_request
-                    },
-                    None => {
-                        return MmError::err(CoinConfWithProtocolError::CoinProtocolParseError {
+                Err(err) => {
+                    let protocol_from_request =
+                        protocol_from_request.ok_or_else(|| CoinConfWithProtocolError::CoinProtocolParseError {
                             ticker: coin.into(),
                             err,
-                        })
-                    },
+                        })?;
+                    // Todo: Remove this once order matching using contract instead of ticker is implemented
+                    conf["wallet_only"] = json::Value::Bool(true);
+                    protocol_from_request
                 },
             };
             drop_mutability!(conf);
