@@ -756,6 +756,7 @@ pub trait UtxoCoinBuilderCommonOps {
 
     #[cfg(target_arch = "wasm32")]
     fn tx_cache(&self) -> UtxoVerboseCacheShared {
+        #[allow(clippy::default_constructed_unit_structs)] // This is a false-possitive bug from clippy
         crate::utxo::tx_cache::wasm_tx_cache::WasmVerboseCache::default().into_shared()
     }
 

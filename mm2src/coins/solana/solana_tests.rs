@@ -1,15 +1,17 @@
-use super::*;
-use crate::solana::solana_common_tests::{generate_key_pair_from_iguana_seed, generate_key_pair_from_seed,
-                                         solana_coin_for_test, SolanaNet};
-use crate::solana::solana_decode_tx_helpers::SolanaConfirmedTransaction;
-use crate::MarketCoinOps;
 use base58::ToBase58;
 use common::{block_on, Future01CompatExt};
+use rpc::v1::types::Bytes;
 use solana_client::rpc_request::TokenAccountsFilter;
-use solana_sdk::signature::{Signature, Signer};
+use solana_sdk::{bs58,
+                 signature::{Signature, Signer}};
 use solana_transaction_status::UiTransactionEncoding;
-use std::ops::Neg;
-use std::str::FromStr;
+use std::{ops::Neg, str::FromStr};
+
+use super::solana_common_tests::{generate_key_pair_from_iguana_seed, generate_key_pair_from_seed,
+                                 solana_coin_for_test, SolanaNet};
+use super::solana_decode_tx_helpers::SolanaConfirmedTransaction;
+use super::*;
+use crate::{MarketCoinOps, SwapTxTypeWithSecretHash};
 
 #[test]
 #[cfg(not(target_arch = "wasm32"))]
@@ -334,4 +336,101 @@ fn solana_test_tx_history() {
         history.append(&mut txs);
     }
     log!("{}", serde_json::to_string(&history).unwrap());
+}
+
+#[test]
+fn solana_coin_send_and_refund_maker_payment() {
+    let passphrase = "federal stay trigger hour exist success game vapor become comfort action phone bright ill target wild nasty crumble dune close rare fabric hen iron".to_string();
+    let (_, coin) = solana_coin_for_test(passphrase, SolanaNet::Devnet);
+    let solana_program_id = "3fystoi7pB1cnDEbRRpSjFJA4fG3W2vQQZ21jSrBc11B";
+    let solana_program_id = bs58::decode(solana_program_id).into_vec().unwrap_or_else(|e| {
+        log!("Failed to decode program ID: {}", e);
+        Vec::new()
+    });
+
+    let pk_data = [1; 32];
+    let time_lock = now_sec() - 3600;
+    let taker_pub = coin.key_pair.pubkey().to_string();
+    let taker_pub = Pubkey::from_str(taker_pub.as_str()).unwrap();
+    let secret = [0; 32];
+    let secret_hash = sha256(&secret);
+
+    let args = SendPaymentArgs {
+        time_lock_duration: 0,
+        time_lock,
+        other_pubkey: taker_pub.as_ref(),
+        secret_hash: secret_hash.as_slice(),
+        amount: "0.01".parse().unwrap(),
+        swap_contract_address: &Some(Bytes::from(solana_program_id.clone())),
+        swap_unique_data: &[],
+        payment_instructions: &None,
+        watcher_reward: None,
+        wait_for_confirmation_until: 0,
+    };
+    let tx = coin.send_maker_payment(args).wait().unwrap();
+    log!("swap tx {:?}", tx);
+
+    let refund_args = RefundPaymentArgs {
+        payment_tx: &tx.tx_hex(),
+        time_lock,
+        other_pubkey: taker_pub.as_ref(),
+        tx_type_with_secret_hash: SwapTxTypeWithSecretHash::TakerOrMakerPayment {
+            maker_secret_hash: secret_hash.as_slice(),
+        },
+        swap_contract_address: &Some(Bytes::from(solana_program_id)),
+        swap_unique_data: pk_data.as_slice(),
+        watcher_reward: false,
+    };
+    let refund_tx = block_on(coin.send_maker_refunds_payment(refund_args)).unwrap();
+    log!("refund tx {:?}", refund_tx);
+}
+
+#[test]
+fn solana_coin_send_and_spend_maker_payment() {
+    let passphrase = "federal stay trigger hour exist success game vapor become comfort action phone bright ill target wild nasty crumble dune close rare fabric hen iron".to_string();
+    let (_, coin) = solana_coin_for_test(passphrase, SolanaNet::Devnet);
+    let solana_program_id = "3fystoi7pB1cnDEbRRpSjFJA4fG3W2vQQZ21jSrBc11B";
+    let solana_program_id = bs58::decode(solana_program_id).into_vec().unwrap_or_else(|e| {
+        log!("Failed to decode program ID: {}", e);
+        Vec::new()
+    });
+
+    let pk_data = [1; 32];
+    let lock_time = now_sec() - 1000;
+    let taker_pub = coin.key_pair.pubkey().to_string();
+    let taker_pub = Pubkey::from_str(taker_pub.as_str()).unwrap();
+    let secret = [0; 32];
+    let secret_hash = sha256(&secret);
+
+    let maker_payment_args = SendPaymentArgs {
+        time_lock_duration: 0,
+        time_lock: lock_time,
+        other_pubkey: taker_pub.as_ref(),
+        secret_hash: secret_hash.as_slice(),
+        amount: "0.01".parse().unwrap(),
+        swap_contract_address: &Some(Bytes::from(solana_program_id.clone())),
+        swap_unique_data: &[],
+        payment_instructions: &None,
+        watcher_reward: None,
+        wait_for_confirmation_until: 0,
+    };
+
+    let tx = coin.send_maker_payment(maker_payment_args).wait().unwrap();
+    log!("swap tx {:?}", tx);
+
+    let maker_pub = taker_pub;
+
+    let spends_payment_args = SpendPaymentArgs {
+        other_payment_tx: &tx.tx_hex(),
+        time_lock: lock_time,
+        other_pubkey: maker_pub.as_ref(),
+        secret: &secret,
+        secret_hash: secret_hash.as_slice(),
+        swap_contract_address: &Some(Bytes::from(solana_program_id)),
+        swap_unique_data: pk_data.as_slice(),
+        watcher_reward: false,
+    };
+
+    let spend_tx = block_on(coin.send_taker_spends_maker_payment(spends_payment_args)).unwrap();
+    log!("spend tx {}", hex::encode(spend_tx.tx_hash_as_bytes().0));
 }

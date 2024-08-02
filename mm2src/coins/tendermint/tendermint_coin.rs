@@ -68,6 +68,7 @@ use mm2_git::{FileMetadata, GitController, GithubClient, RepositoryOperations, G
 use mm2_number::MmNumber;
 use parking_lot::Mutex as PaMutex;
 use primitives::hash::H256;
+use regex::Regex;
 use rpc::v1::types::Bytes as BytesJson;
 use serde_json::{self as json, Value as Json};
 use std::collections::HashMap;
@@ -105,7 +106,16 @@ pub(crate) const TX_DEFAULT_MEMO: &str = "";
 const MAX_TIME_LOCK: i64 = 34560;
 const MIN_TIME_LOCK: i64 = 50;
 
-const ACCOUNT_SEQUENCE_ERR: &str = "incorrect account sequence";
+const ACCOUNT_SEQUENCE_ERR: &str = "account sequence mismatch";
+
+lazy_static! {
+    static ref SEQUENCE_PARSER_REGEX: Regex = Regex::new(r"expected (\d+)").unwrap();
+}
+
+pub struct SerializedUnsignedTx {
+    tx_json: Json,
+    body_bytes: Vec<u8>,
+}
 
 type TendermintPrivKeyPolicy = PrivKeyPolicy<TendermintKeyPair>;
 
@@ -346,6 +356,7 @@ pub struct TendermintCoinImpl {
     client: TendermintRpcClient,
     pub(crate) chain_registry_name: Option<String>,
     pub(crate) ctx: MmWeak,
+    pub(crate) is_keplr_from_ledger: bool,
 }
 
 #[derive(Clone)]
@@ -599,6 +610,7 @@ impl TendermintCommons for TendermintCoin {
 }
 
 impl TendermintCoin {
+    #[allow(clippy::too_many_arguments)]
     pub async fn init(
         ctx: &MmArc,
         ticker: String,
@@ -607,6 +619,7 @@ impl TendermintCoin {
         rpc_urls: Vec<String>,
         tx_history: bool,
         activation_policy: TendermintActivationPolicy,
+        is_keplr_from_ledger: bool,
     ) -> MmResult<Self, TendermintInitError> {
         if rpc_urls.is_empty() {
             return MmError::err(TendermintInitError {
@@ -671,6 +684,7 @@ impl TendermintCoin {
             client: TendermintRpcClient(AsyncMutex::new(client_impl)),
             chain_registry_name: protocol_info.chain_registry_name,
             ctx: ctx.weak(),
+            is_keplr_from_ledger,
         })))
     }
 
@@ -739,7 +753,7 @@ impl TendermintCoin {
     // Therefore, we can call SimulateRequest or CheckTx(doesn't work with using Abci interface) to get used gas or fee itself.
     pub(super) fn gen_simulated_tx(
         &self,
-        account_info: BaseAccount,
+        account_info: &BaseAccount,
         priv_key: &Secp256k1Secret,
         tx_payload: Any,
         timeout_height: u64,
@@ -826,10 +840,11 @@ impl TendermintCoin {
         timeout_height: u64,
         memo: String,
     ) -> Result<(String, Raw), TransactionErr> {
+        let mut account_info = try_tx_s!(self.account_info(&self.account_id).await);
         let (tx_id, tx_raw) = loop {
             let tx_raw = try_tx_s!(self.any_to_signed_raw_tx(
                 try_tx_s!(self.activation_policy.activated_key_or_err()),
-                try_tx_s!(self.account_info(&self.account_id).await),
+                &account_info,
                 tx_payload.clone(),
                 fee.clone(),
                 timeout_height,
@@ -840,6 +855,7 @@ impl TendermintCoin {
                 Ok(tx_id) => break (tx_id, tx_raw),
                 Err(e) => {
                     if e.contains(ACCOUNT_SEQUENCE_ERR) {
+                        account_info.sequence = try_tx_s!(parse_expected_sequence_number(&e));
                         debug!("Got wrong account sequence, trying again.");
                         continue;
                     }
@@ -868,19 +884,14 @@ impl TendermintCoin {
         let ctx = try_tx_s!(MmArc::from_weak(&self.ctx).ok_or(ERRL!("ctx must be initialized already")));
 
         let account_info = try_tx_s!(self.account_info(&self.account_id).await);
-        let sign_doc = try_tx_s!(self.any_to_sign_doc(account_info, tx_payload, fee, timeout_height, memo));
-
-        let unsigned_tx = json!({
-            "sign_doc": {
-                "body_bytes": sign_doc.body_bytes,
-                "auth_info_bytes": sign_doc.auth_info_bytes,
-                "chain_id": sign_doc.chain_id,
-                "account_number": sign_doc.account_number,
-            }
-        });
+        let SerializedUnsignedTx { tx_json, body_bytes } = if self.is_keplr_from_ledger {
+            try_tx_s!(self.any_to_legacy_amino_json(&account_info, tx_payload, fee, timeout_height, memo))
+        } else {
+            try_tx_s!(self.any_to_serialized_sign_doc(&account_info, tx_payload, fee, timeout_height, memo))
+        };
 
         let data: TxHashData = try_tx_s!(ctx
-            .ask_for_data(&format!("TX_HASH:{}", self.ticker()), unsigned_tx, timeout)
+            .ask_for_data(&format!("TX_HASH:{}", self.ticker()), tx_json, timeout)
             .await
             .map_err(|e| ERRL!("{}", e)));
 
@@ -892,7 +903,7 @@ impl TendermintCoin {
             signatures: tx.signatures,
         };
 
-        if sign_doc.body_bytes != tx_raw_inner.body_bytes {
+        if body_bytes != tx_raw_inner.body_bytes {
             return Err(crate::TransactionErr::Plain(ERRL!(
                 "Unsigned transaction don't match with the externally provided transaction."
             )));
@@ -921,11 +932,11 @@ impl TendermintCoin {
             return Ok(Fee::from_amount_and_gas(fee_amount, gas_limit));
         };
 
+        let mut account_info = self.account_info(&self.account_id).await?;
         let (response, raw_response) = loop {
-            let account_info = self.account_info(&self.account_id).await?;
             let tx_bytes = self
                 .gen_simulated_tx(
-                    account_info,
+                    &account_info,
                     activated_priv_key,
                     msg.clone(),
                     timeout_height,
@@ -942,7 +953,9 @@ impl TendermintCoin {
 
             let raw_response = self.rpc_client().await?.perform(request).await?;
 
-            if raw_response.response.log.to_string().contains(ACCOUNT_SEQUENCE_ERR) {
+            let log = raw_response.response.log.to_string();
+            if log.contains(ACCOUNT_SEQUENCE_ERR) {
+                account_info.sequence = parse_expected_sequence_number(&log)?;
                 debug!("Got wrong account sequence, trying again.");
                 continue;
             }
@@ -997,10 +1010,10 @@ impl TendermintCoin {
             return Ok(((GAS_WANTED_BASE_VALUE * 1.5) * gas_price).ceil() as u64);
         };
 
+        let mut account_info = self.account_info(account_id).await?;
         let (response, raw_response) = loop {
-            let account_info = self.account_info(account_id).await?;
             let tx_bytes = self
-                .gen_simulated_tx(account_info, &priv_key, msg.clone(), timeout_height, memo.clone())
+                .gen_simulated_tx(&account_info, &priv_key, msg.clone(), timeout_height, memo.clone())
                 .map_to_mm(|e| TendermintCoinRpcError::InternalError(format!("{}", e)))?;
 
             let request = AbciRequest::new(
@@ -1012,7 +1025,9 @@ impl TendermintCoin {
 
             let raw_response = self.rpc_client().await?.perform(request).await?;
 
-            if raw_response.response.log.to_string().contains(ACCOUNT_SEQUENCE_ERR) {
+            let log = raw_response.response.log.to_string();
+            if log.contains(ACCOUNT_SEQUENCE_ERR) {
+                account_info.sequence = parse_expected_sequence_number(&log)?;
                 debug!("Got wrong account sequence, trying again.");
                 continue;
             }
@@ -1151,7 +1166,7 @@ impl TendermintCoin {
         &self,
         maybe_pk: Option<H256>,
         message: Any,
-        account_info: BaseAccount,
+        account_info: &BaseAccount,
         fee: Fee,
         timeout_height: u64,
         memo: String,
@@ -1166,18 +1181,13 @@ impl TendermintCoin {
                 hex::encode_upper(hash.as_slice()),
             ))
         } else {
-            let sign_doc = self.any_to_sign_doc(account_info, message, fee, timeout_height, memo)?;
+            let SerializedUnsignedTx { tx_json, .. } = if self.is_keplr_from_ledger {
+                self.any_to_legacy_amino_json(account_info, message, fee, timeout_height, memo)
+            } else {
+                self.any_to_serialized_sign_doc(account_info, message, fee, timeout_height, memo)
+            }?;
 
-            let tx = json!({
-                "sign_doc": {
-                    "body_bytes": sign_doc.body_bytes,
-                    "auth_info_bytes": sign_doc.auth_info_bytes,
-                    "chain_id": sign_doc.chain_id,
-                    "account_number": sign_doc.account_number,
-                }
-            });
-
-            Ok(TransactionData::Unsigned(tx))
+            Ok(TransactionData::Unsigned(tx_json))
         }
     }
 
@@ -1240,7 +1250,7 @@ impl TendermintCoin {
     pub(super) fn any_to_signed_raw_tx(
         &self,
         priv_key: &Secp256k1Secret,
-        account_info: BaseAccount,
+        account_info: &BaseAccount,
         tx_payload: Any,
         fee: Fee,
         timeout_height: u64,
@@ -1253,18 +1263,116 @@ impl TendermintCoin {
         sign_doc.sign(&signkey)
     }
 
-    pub(super) fn any_to_sign_doc(
+    pub(super) fn any_to_serialized_sign_doc(
         &self,
-        account_info: BaseAccount,
+        account_info: &BaseAccount,
         tx_payload: Any,
         fee: Fee,
         timeout_height: u64,
         memo: String,
-    ) -> cosmrs::Result<SignDoc> {
+    ) -> cosmrs::Result<SerializedUnsignedTx> {
         let tx_body = tx::Body::new(vec![tx_payload], memo, timeout_height as u32);
         let pubkey = self.activation_policy.public_key()?.into();
         let auth_info = SignerInfo::single_direct(Some(pubkey), account_info.sequence).auth_info(fee);
-        SignDoc::new(&tx_body, &auth_info, &self.chain_id, account_info.account_number)
+        let sign_doc = SignDoc::new(&tx_body, &auth_info, &self.chain_id, account_info.account_number)?;
+
+        let tx_json = json!({
+            "sign_doc": {
+                "body_bytes": sign_doc.body_bytes,
+                "auth_info_bytes": sign_doc.auth_info_bytes,
+                "chain_id": sign_doc.chain_id,
+                "account_number": sign_doc.account_number,
+            }
+        });
+
+        Ok(SerializedUnsignedTx {
+            tx_json,
+            body_bytes: sign_doc.body_bytes,
+        })
+    }
+
+    /// This should only be used for Keplr from Ledger!
+    /// When using Keplr from Ledger, they don't accept `SING_MODE_DIRECT` transactions.
+    ///
+    /// Visit https://docs.cosmos.network/main/build/architecture/adr-050-sign-mode-textual#context for more context.
+    pub(super) fn any_to_legacy_amino_json(
+        &self,
+        account_info: &BaseAccount,
+        tx_payload: Any,
+        fee: Fee,
+        timeout_height: u64,
+        memo: String,
+    ) -> cosmrs::Result<SerializedUnsignedTx> {
+        const MSG_SEND_TYPE_URL: &str = "/cosmos.bank.v1beta1.MsgSend";
+        const LEDGER_MSG_SEND_TYPE_URL: &str = "cosmos-sdk/MsgSend";
+
+        // Ledger's keplr works as wallet-only, so `MsgSend` support is enough for now.
+        if tx_payload.type_url != MSG_SEND_TYPE_URL {
+            return Err(ErrorReport::new(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "Signing mode `SIGN_MODE_LEGACY_AMINO_JSON` is not supported for '{}' transaction type.",
+                    tx_payload.type_url
+                ),
+            )));
+        }
+
+        let msg_send = MsgSend::from_any(&tx_payload)?;
+        let timeout_height = u32::try_from(timeout_height)?;
+        let original_tx_type_url = tx_payload.type_url.clone();
+        let body_bytes = tx::Body::new(vec![tx_payload], &memo, timeout_height).into_bytes()?;
+
+        let amount: Vec<Json> = msg_send
+            .amount
+            .into_iter()
+            .map(|t| {
+                json!( {
+                    "denom": t.denom,
+                    // Numbers needs to be converted into string type.
+                    // Ref: https://github.com/cosmos/ledger-cosmos/blob/c707129e59f6e0f07ad67161a6b75e8951af063c/docs/TXSPEC.md#json-format
+                    "amount": t.amount.to_string(),
+                })
+            })
+            .collect();
+
+        let msg = json!({
+            "type": LEDGER_MSG_SEND_TYPE_URL,
+            "value": json!({
+                "from_address": msg_send.from_address.to_string(),
+                "to_address": msg_send.to_address.to_string(),
+                "amount": amount,
+            })
+        });
+
+        let fee_amount: Vec<Json> = fee
+            .amount
+            .into_iter()
+            .map(|t| {
+                json!( {
+                    "denom": t.denom,
+                    // Numbers needs to be converted into string type.
+                    // Ref: https://github.com/cosmos/ledger-cosmos/blob/c707129e59f6e0f07ad67161a6b75e8951af063c/docs/TXSPEC.md#json-format
+                    "amount": t.amount.to_string(),
+                })
+            })
+            .collect();
+
+        let tx_json = serde_json::json!({
+            "legacy_amino_json": {
+                "account_number": account_info.account_number.to_string(),
+                "chain_id": self.chain_id.to_string(),
+                "fee": {
+                    "amount": fee_amount,
+                    "gas": fee.gas_limit.to_string()
+                },
+                "memo": memo,
+                "msgs": [msg],
+                "sequence": account_info.sequence.to_string(),
+            },
+            "original_tx_type_url": original_tx_type_url,
+        });
+
+        Ok(SerializedUnsignedTx { tx_json, body_bytes })
     }
 
     pub fn add_activated_token_info(&self, ticker: String, decimals: u8, denom: Denom) {
@@ -2024,6 +2132,13 @@ pub async fn get_ibc_chain_list() -> IBCChainRegistriesResult {
 impl MmCoin for TendermintCoin {
     fn is_asset_chain(&self) -> bool { false }
 
+    fn wallet_only(&self, ctx: &MmArc) -> bool {
+        let coin_conf = crate::coin_conf(ctx, self.ticker());
+        let wallet_only_conf = coin_conf["wallet_only"].as_bool().unwrap_or(false);
+
+        wallet_only_conf || self.is_keplr_from_ledger
+    }
+
     fn spawner(&self) -> CoinFutSpawner { CoinFutSpawner::new(&self.abortable_system) }
 
     fn withdraw(&self, req: WithdrawRequest) -> WithdrawFut {
@@ -2060,29 +2175,23 @@ impl MmCoin for TendermintCoin {
                 BigDecimal::default()
             };
 
-            let msg_payload = if is_ibc_transfer {
-                let channel_id = match req.ibc_source_channel {
-                    Some(channel_id) => channel_id,
-                    None => coin.detect_channel_id_for_ibc_transfer(&to_address).await?,
-                };
-
-                MsgTransfer::new_with_default_timeout(channel_id, account_id.clone(), to_address.clone(), Coin {
-                    denom: coin.denom.clone(),
-                    amount: amount_denom.into(),
-                })
-                .to_any()
-            } else {
-                MsgSend {
-                    from_address: account_id.clone(),
-                    to_address: to_address.clone(),
-                    amount: vec![Coin {
-                        denom: coin.denom.clone(),
-                        amount: amount_denom.into(),
-                    }],
+            let channel_id = if is_ibc_transfer {
+                match &req.ibc_source_channel {
+                    Some(_) => req.ibc_source_channel,
+                    None => Some(coin.detect_channel_id_for_ibc_transfer(&to_address).await?),
                 }
-                .to_any()
-            }
-            .map_to_mm(|e| WithdrawError::InternalError(e.to_string()))?;
+            } else {
+                None
+            };
+
+            let msg_payload = create_withdraw_msg_as_any(
+                account_id.clone(),
+                to_address.clone(),
+                &coin.denom,
+                amount_denom,
+                channel_id.clone(),
+            )
+            .await?;
 
             let memo = req.memo.unwrap_or_else(|| TX_DEFAULT_MEMO.into());
 
@@ -2110,6 +2219,18 @@ impl MmCoin for TendermintCoin {
                     req.fee,
                 )
                 .await?;
+
+            let fee_amount_u64 = if coin.is_keplr_from_ledger {
+                // When using `SIGN_MODE_LEGACY_AMINO_JSON`, Keplr ignores the fee we calculated
+                // and calculates another one which is usually double what we calculate.
+                // To make sure the transaction doesn't fail on the Keplr side (because if Keplr
+                // calculates a higher fee than us, the withdrawal might fail), we use three times
+                // the actual fee.
+                fee_amount_u64 * 3
+            } else {
+                fee_amount_u64
+            };
+
             let fee_amount_dec = big_decimal_from_sat_unsigned(fee_amount_u64, coin.decimals());
 
             let fee_amount = Coin {
@@ -2142,10 +2263,19 @@ impl MmCoin for TendermintCoin {
                 (sat_from_big_decimal(&req.amount, coin.decimals)?, total)
             };
 
+            let msg_payload = create_withdraw_msg_as_any(
+                account_id.clone(),
+                to_address.clone(),
+                &coin.denom,
+                amount_denom,
+                channel_id,
+            )
+            .await?;
+
             let account_info = coin.account_info(&account_id).await?;
 
             let tx = coin
-                .any_to_transaction_data(maybe_pk, msg_payload, account_info, fee, timeout_height, memo.clone())
+                .any_to_transaction_data(maybe_pk, msg_payload, &account_info, fee, timeout_height, memo.clone())
                 .map_to_mm(|e| WithdrawError::InternalError(e.to_string()))?;
 
             let internal_id = {
@@ -3030,6 +3160,33 @@ pub(crate) fn chain_registry_name_from_account_prefix(ctx: &MmArc, prefix: &str)
     None
 }
 
+pub(crate) async fn create_withdraw_msg_as_any(
+    sender: AccountId,
+    receiver: AccountId,
+    denom: &Denom,
+    amount: u64,
+    ibc_source_channel: Option<String>,
+) -> Result<Any, MmError<WithdrawError>> {
+    if let Some(channel_id) = ibc_source_channel {
+        MsgTransfer::new_with_default_timeout(channel_id, sender, receiver, Coin {
+            denom: denom.clone(),
+            amount: amount.into(),
+        })
+        .to_any()
+    } else {
+        MsgSend {
+            from_address: sender,
+            to_address: receiver,
+            amount: vec![Coin {
+                denom: denom.clone(),
+                amount: amount.into(),
+            }],
+        }
+        .to_any()
+    }
+    .map_to_mm(|e| WithdrawError::InternalError(e.to_string()))
+}
+
 pub async fn get_ibc_transfer_channels(
     source_registry_name: String,
     destination_registry_name: String,
@@ -3108,6 +3265,20 @@ pub async fn get_ibc_transfer_channels(
     Ok(IBCTransferChannelsResponse {
         ibc_transfer_channels: result,
     })
+}
+
+fn parse_expected_sequence_number(e: &str) -> MmResult<u64, TendermintCoinRpcError> {
+    if let Some(sequence) = SEQUENCE_PARSER_REGEX.captures(e).and_then(|c| c.get(1)) {
+        let account_sequence =
+            u64::from_str(sequence.as_str()).map_to_mm(|e| TendermintCoinRpcError::InternalError(e.to_string()))?;
+
+        return Ok(account_sequence);
+    }
+
+    MmError::err(TendermintCoinRpcError::InternalError(format!(
+        "Could not parse the expected sequence number from this error message: '{}'",
+        e
+    )))
 }
 
 #[cfg(test)]
@@ -3214,6 +3385,7 @@ pub mod tendermint_coin_tests {
             rpc_urls,
             false,
             activation_policy,
+            false,
         ))
         .unwrap();
 
@@ -3339,6 +3511,7 @@ pub mod tendermint_coin_tests {
             rpc_urls,
             false,
             activation_policy,
+            false,
         ))
         .unwrap();
 
@@ -3401,6 +3574,7 @@ pub mod tendermint_coin_tests {
             rpc_urls,
             false,
             activation_policy,
+            false,
         ))
         .unwrap();
 
@@ -3474,6 +3648,7 @@ pub mod tendermint_coin_tests {
             rpc_urls,
             false,
             activation_policy,
+            false,
         ))
         .unwrap();
 
@@ -3670,6 +3845,7 @@ pub mod tendermint_coin_tests {
             rpc_urls,
             false,
             activation_policy,
+            false,
         ))
         .unwrap();
 
@@ -3752,6 +3928,7 @@ pub mod tendermint_coin_tests {
             rpc_urls,
             false,
             activation_policy,
+            false,
         ))
         .unwrap();
 
@@ -3827,6 +4004,7 @@ pub mod tendermint_coin_tests {
             rpc_urls,
             false,
             activation_policy,
+            false,
         ))
         .unwrap();
 
@@ -3898,6 +4076,7 @@ pub mod tendermint_coin_tests {
             rpc_urls,
             false,
             activation_policy,
+            false,
         ))
         .unwrap();
 
@@ -3952,6 +4131,7 @@ pub mod tendermint_coin_tests {
             rpc_urls,
             false,
             activation_policy,
+            false,
         ))
         .unwrap();
 
@@ -4009,5 +4189,20 @@ pub mod tendermint_coin_tests {
         let pb_account_id = pb_activation_policy.generate_account_id("cosmos").unwrap();
         // Public and private keys are from the same keypair, account ids must be equal.
         assert_eq!(pk_account_id, pb_account_id);
+    }
+
+    #[test]
+    fn test_parse_expected_sequence_number() {
+        assert_eq!(
+            13,
+            parse_expected_sequence_number("check_tx log: account sequence mismatch, expected 13").unwrap()
+        );
+        assert_eq!(
+            5,
+            parse_expected_sequence_number("check_tx log: account sequence mismatch, expected 5, got...").unwrap()
+        );
+        assert_eq!(17, parse_expected_sequence_number("account sequence mismatch, expected. check_tx log: account sequence mismatch, expected 17, got 16: incorrect account sequence, deliver_tx log...").unwrap());
+        assert!(parse_expected_sequence_number("").is_err());
+        assert!(parse_expected_sequence_number("check_tx log: account sequence mismatch, expected").is_err());
     }
 }
