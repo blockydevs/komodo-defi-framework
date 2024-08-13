@@ -1,11 +1,11 @@
 use super::swap_v2_common::*;
 use super::{swap_v2_topic, LockedAmount, LockedAmountInfo, SavedTradeFee, SwapsContext, NEGOTIATE_SEND_INTERVAL,
             NEGOTIATION_TIMEOUT_SEC};
-use crate::mm2::lp_swap::maker_swap::MakerSwapPreparedParams;
-use crate::mm2::lp_swap::swap_lock::SwapLock;
-use crate::mm2::lp_swap::{broadcast_swap_v2_msg_every, check_balance_for_maker_swap, recv_swap_v2_msg, SecretHashAlgo,
-                          SwapConfirmationsSettings, TransactionIdentifier, MAKER_SWAP_V2_TYPE, MAX_STARTED_AT_DIFF};
-use crate::mm2::lp_swap::{swap_v2_pb::*, NO_REFUND_FEE};
+use crate::lp_swap::maker_swap::MakerSwapPreparedParams;
+use crate::lp_swap::swap_lock::SwapLock;
+use crate::lp_swap::{broadcast_swap_v2_msg_every, check_balance_for_maker_swap, recv_swap_v2_msg, SecretHashAlgo,
+                     SwapConfirmationsSettings, TransactionIdentifier, MAKER_SWAP_V2_TYPE, MAX_STARTED_AT_DIFF};
+use crate::lp_swap::{swap_v2_pb::*, NO_REFUND_FEE};
 use async_trait::async_trait;
 use bitcrypto::{dhash160, sha256};
 use coins::{CanRefundHtlc, ConfirmPaymentInput, DexFee, FeeApproxStage, FundingTxSpend, GenTakerFundingSpendArgs,
@@ -32,14 +32,14 @@ use std::marker::PhantomData;
 use uuid::Uuid;
 
 cfg_native!(
-    use crate::mm2::database::my_swaps::{insert_new_swap_v2, SELECT_MY_SWAP_V2_BY_UUID};
+    use crate::database::my_swaps::{insert_new_swap_v2, SELECT_MY_SWAP_V2_BY_UUID};
     use common::async_blocking;
     use db_common::sqlite::rusqlite::{named_params, Error as SqlError, Result as SqlResult, Row};
     use db_common::sqlite::rusqlite::types::Type as SqlType;
 );
 
 cfg_wasm32!(
-    use crate::mm2::lp_swap::swap_wasm_db::{MySwapsFiltersTable, SavedSwapTable};
+    use crate::lp_swap::swap_wasm_db::{MySwapsFiltersTable, SavedSwapTable};
 );
 
 // This is needed to have Debug on messages
@@ -903,8 +903,8 @@ impl<MakerCoin: MmCoin + MakerCoinSwapOpsV2, TakerCoin: MmCoin + TakerCoinSwapOp
             started_at: state_machine.started_at,
             payment_locktime: state_machine.maker_payment_locktime(),
             secret_hash: state_machine.secret_hash(),
-            maker_coin_htlc_pub: state_machine.maker_coin.derive_htlc_pubkey(&unique_data),
-            taker_coin_htlc_pub: state_machine.taker_coin.derive_htlc_pubkey(&unique_data),
+            maker_coin_htlc_pub: state_machine.maker_coin.derive_htlc_pubkey_v2_bytes(&unique_data),
+            taker_coin_htlc_pub: state_machine.taker_coin.derive_htlc_pubkey_v2_bytes(&unique_data),
             maker_coin_swap_contract: state_machine.maker_coin.swap_contract_address().map(|bytes| bytes.0),
             taker_coin_swap_contract: state_machine.taker_coin.swap_contract_address().map(|bytes| bytes.0),
             taker_coin_address: state_machine.taker_coin.my_addr().await.to_string(),

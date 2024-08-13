@@ -21,8 +21,24 @@
 //  Copyright © 2023 Pampex LTD and TillyHK LTD. All rights reserved.
 //
 
+#![feature(hash_raw_entry)]
+// `mockable` implementation uses these
+#![allow(
+    forgetting_references,
+    forgetting_copy_types,
+    clippy::swap_ptr_to_ref,
+    clippy::forget_non_drop,
+    clippy::let_unit_value
+)]
 #![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 #![cfg_attr(target_arch = "wasm32", allow(unused_imports))]
+
+#[macro_use] extern crate common;
+#[macro_use] extern crate gstuff;
+#[macro_use] extern crate serde_json;
+#[macro_use] extern crate serde_derive;
+#[macro_use] extern crate ser_error_derive;
+#[cfg(test)] extern crate mm2_test_helpers;
 
 #[cfg(not(target_arch = "wasm32"))] use common::block_on;
 use common::crash_reports::init_crash_reports;
@@ -48,25 +64,24 @@ use std::process::exit;
 use std::ptr::null;
 use std::str;
 
-#[path = "lp_native_dex.rs"] mod lp_native_dex;
+mod lp_native_dex;
 pub use self::lp_native_dex::init_hw;
 pub use self::lp_native_dex::lp_init;
 use coins::update_coins_config;
 use mm2_err_handle::prelude::*;
 
-#[cfg(not(target_arch = "wasm32"))]
-#[path = "database.rs"]
-pub mod database;
+#[cfg(not(target_arch = "wasm32"))] pub mod database;
 
-#[path = "heartbeat_event.rs"] pub mod heartbeat_event;
-#[path = "lp_dispatcher.rs"] pub mod lp_dispatcher;
-#[path = "lp_message_service.rs"] pub mod lp_message_service;
-#[path = "lp_network.rs"] pub mod lp_network;
-#[path = "lp_ordermatch.rs"] pub mod lp_ordermatch;
-#[path = "lp_stats.rs"] pub mod lp_stats;
-#[path = "lp_swap.rs"] pub mod lp_swap;
-#[path = "lp_wallet.rs"] pub mod lp_wallet;
-#[path = "rpc.rs"] pub mod rpc;
+pub mod heartbeat_event;
+pub mod lp_dispatcher;
+pub mod lp_message_service;
+pub mod lp_network;
+pub mod lp_ordermatch;
+pub mod lp_stats;
+pub mod lp_swap;
+pub mod lp_wallet;
+pub mod rpc;
+#[cfg(all(target_arch = "wasm32", test))] mod wasm_tests;
 
 pub const PASSWORD_MAXIMUM_CONSECUTIVE_CHARACTERS: usize = 3;
 
@@ -112,7 +127,7 @@ pub async fn lp_main(
 ) -> Result<(), String> {
     let log_filter = params.filter.unwrap_or_default();
     // Logger can be initialized once.
-    // If `mm2` is linked as a library, and `mm2` is restarted, `init_logger` returns an error.
+    // If `kdf` is linked as a library, and `kdf` is restarted, `init_logger` returns an error.
     init_logger(log_filter, params.conf["silent_console"].as_bool().unwrap_or_default()).ok();
 
     let conf = params.conf;
@@ -168,7 +183,7 @@ Some (but not all) of the JSON configuration parameters (* - required):
                      If the field isn't present on the command line then we try loading it from the 'coins' file.
   crash          ..  Simulate a crash to check how the crash handling works.
   dbdir          ..  MM database path. 'DB' by default.
-  gui            ..  The information about GUI app using MM2 instance. Included in swap statuses shared with network.
+  gui            ..  The information about GUI app using KDF instance. Included in swap statuses shared with network.
                  ..  It's recommended to put essential info to this field (application name, OS, version, etc).
                  ..  e.g. AtomicDEX iOS 1.0.1000.
   myipaddr       ..  IP address to bind to for P2P networking.
@@ -184,7 +199,7 @@ Some (but not all) of the JSON configuration parameters (* - required):
   rpc_local_only ..  MM forbids some RPC requests from not loopback (localhost) IPs as additional security measure.
                      Defaults to `true`, set `false` to disable. `Use with caution`.
   rpcport        ..  If > 1000 overrides the 7783 default.
-  i_am_seed      ..  Activate the seed node mode (acting as a relay for mm2 clients).
+  i_am_seed      ..  Activate the seed node mode (acting as a relay for kdf clients).
                      Defaults to `false`.
   seednodes      ..  Seednode IPs that node will use.
                      At least one seed IP must be present if the node is not a seed itself.

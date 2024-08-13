@@ -193,7 +193,7 @@ cfg_wasm32! {
 const KOMODO_DEFI_FRAMEWORK_DIR_NAME: &str = ".kdf";
 
 pub const X_GRPC_WEB: &str = "x-grpc-web";
-pub const X_API_KEY: &str = "X-API-Key";
+pub const X_AUTH_PAYLOAD: &str = "X-Auth-Payload";
 pub const APPLICATION_JSON: &str = "application/json";
 pub const APPLICATION_GRPC_WEB: &str = "application/grpc-web";
 pub const APPLICATION_GRPC_WEB_PROTO: &str = "application/grpc-web+proto";
@@ -375,10 +375,9 @@ pub fn stack_trace_frame(instr_ptr: *mut c_void, buf: &mut dyn Write, symbol: &b
     // Skip common and less than informative frames.
 
     match name {
-        "mm2::crash_reports::rust_seh_handler"
+        "common::crash_reports::rust_seh_handler"
         | "veh_exception_filter"
         | "common::stack_trace"
-        | "common::log_stacktrace"
         // Super-main on Windows.
         | "__scrt_common_main_seh" => return,
         _ => (),
@@ -396,7 +395,7 @@ pub fn stack_trace_frame(instr_ptr: *mut c_void, buf: &mut dyn Write, symbol: &b
         || name.starts_with("core::ops::")
         || name.starts_with("futures::")
         || name.starts_with("hyper::")
-        || name.starts_with("mm2::crash_reports::signal_handler")
+        || name.starts_with("common::crash_reports::signal_handler")
         || name.starts_with("panic_unwind::")
         || name.starts_with("std::")
         || name.starts_with("scoped_tls::")
@@ -1121,9 +1120,10 @@ pub fn http_uri_to_ws_address(uri: http::Uri) -> String {
     };
 
     let host_address = uri.host().expect("Host can't be empty.");
+    let path = if uri.path() == "/" { "" } else { uri.path() };
     let port = uri.port_u16().map(|p| format!(":{}", p)).unwrap_or_default();
 
-    format!("{}{}{}", address_prefix, host_address, port)
+    format!("{}{}{}{}", address_prefix, host_address, port, path)
 }
 
 #[test]
@@ -1132,13 +1132,22 @@ fn test_http_uri_to_ws_address() {
     let ws_connection = http_uri_to_ws_address(uri);
     assert_eq!(ws_connection, "wss://cosmos-rpc.polkachu.com");
 
-    let uri = "http://cosmos-rpc.polkachu.com".parse::<http::Uri>().unwrap();
+    let uri = "http://cosmos-rpc.polkachu.com/".parse::<http::Uri>().unwrap();
     let ws_connection = http_uri_to_ws_address(uri);
     assert_eq!(ws_connection, "ws://cosmos-rpc.polkachu.com");
 
     let uri = "http://34.82.96.8:26657".parse::<http::Uri>().unwrap();
     let ws_connection = http_uri_to_ws_address(uri);
     assert_eq!(ws_connection, "ws://34.82.96.8:26657");
+
+    let uri = "https://cosmos.blockpi.network/rpc/v1/65cc8a9ffe1627352b911dd4b7c751db4a3eaee3"
+        .parse::<http::Uri>()
+        .unwrap();
+    let ws_connection = http_uri_to_ws_address(uri);
+    assert_eq!(
+        ws_connection,
+        "wss://cosmos.blockpi.network/rpc/v1/65cc8a9ffe1627352b911dd4b7c751db4a3eaee3"
+    );
 }
 
 #[test]
