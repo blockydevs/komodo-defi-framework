@@ -114,7 +114,7 @@ impl ConnectionManagerTrait for Arc<ConnectionManagerSelective> {
     async fn get_active_connections(&self) -> Vec<Arc<ElectrumConnection>> {
         // We might have some other connected servers (e.g. was connected because of connection by address),
         // but we will only return the one we know it's active right now. This also avoids sending pings to
-        // connections that are not used thus keeping their connections alive.
+        // connections that are not used thus avoids keeping their connections alive.
         let maybe_active_connection = self
             .active_address
             .lock()
@@ -207,9 +207,13 @@ impl ConnectionManagerTrait for Arc<ConnectionManagerSelective> {
                     let client = client.clone();
                     async move {
                         let address = connection.address().to_string();
-                        ElectrumConnection::establish_connection_loop(connection, client)
-                            .await
-                            .map(|_| address)
+                        if connection.is_connected().await {
+                            Ok(address)
+                        } else {
+                            ElectrumConnection::establish_connection_loop(connection, client)
+                                .await
+                                .map(|_| address)
+                        }
                     }
                 });
                 // Create an unordered stream of connection loops which will yield connection results as they become ready.
@@ -223,11 +227,9 @@ impl ConnectionManagerTrait for Arc<ConnectionManagerSelective> {
                     }
                 }
 
-                if !manager.get_active_connections().await.is_empty() {
-                    // Since we are connected, wait for a disconnection notification
-                    // before we try connecting to another server.
-                    disconnection_notification.next().await;
-                }
+                // Since we are connected, wait for a disconnection notification
+                // before we try connecting to another server.
+                disconnection_notification.next().await;
             }
         };
         spawner.spawn(task);

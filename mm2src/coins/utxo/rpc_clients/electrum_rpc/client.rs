@@ -14,6 +14,7 @@ use crate::utxo::{output_script, output_script_p2pk, ElectrumManagerPolicy, GetB
 use crate::SharableRpcTransportEventHandler;
 use chain::{BlockHeader, Transaction as UtxoTx, TxHashAlgo};
 use common::executor::abortable_queue::{AbortableQueue, WeakSpawner};
+use common::executor::Timer;
 use common::jsonrpc_client::{JsonRpcBatchClient, JsonRpcClient, JsonRpcError, JsonRpcErrorType, JsonRpcMultiClient,
                              JsonRpcRemoteAddr, JsonRpcRequest, JsonRpcRequestEnum, JsonRpcResponseEnum,
                              JsonRpcResponseFut, RpcRes};
@@ -306,10 +307,14 @@ impl ElectrumClient {
         let req_id = request.rpc_id();
         let request = json::to_string(&request).map_err(|e| JsonRpcErrorType::InvalidRequest(e.to_string()))?;
 
-        let connections = self.connection_manager.get_active_connections().await;
-        if connections.is_empty() {
-            return Err(JsonRpcErrorType::Transport("No connections available".to_string()));
-        }
+        let mut connections = vec![];
+        for _ in 0..10 {
+            connections = self.connection_manager.get_active_connections().await;
+            if !connections.is_empty() {
+                break;
+            }
+            Timer::sleep(0.5).await;
+        };
 
         let mut final_response = None;
         let mut errors = vec![];

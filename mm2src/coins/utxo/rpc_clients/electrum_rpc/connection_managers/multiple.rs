@@ -131,6 +131,7 @@ impl ConnectionManagerTrait for Arc<ConnectionManagerMultiple> {
                 drop(client);
 
                 // Sleep for 5 seconds before checking again.
+                // FIXME: 5 seconds might be a too long time, add a notification mechanism and sleep min(5s, notification).
                 Timer::sleep(5.).await;
             }
         };
