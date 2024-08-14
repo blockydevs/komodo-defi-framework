@@ -165,6 +165,10 @@ impl ConnectionManagerTrait for Arc<ConnectionManagerSelective> {
         spawner.spawn(task);
     }
 
+    // FIXME: We wanted to have the scenario where when a primary connection comes back online
+    // it should be used instead of the currently active secondary connection. THIS IS NOT COVERED HERE.
+    // Abiding by this, we can't relay on a disconnection notification to reconnect, but poll every couple
+    // of seconds to check if the primary connection is back online.
     fn spawn_background_task(&self, spawner: &WeakSpawner) {
         let manager = self.clone();
         let task = async move {
