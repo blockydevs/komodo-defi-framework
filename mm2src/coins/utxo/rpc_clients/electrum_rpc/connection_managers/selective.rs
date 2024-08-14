@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::iter::FromIterator;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use super::super::client::ElectrumClientImpl;
@@ -15,6 +16,7 @@ use common::now_ms;
 use async_trait::async_trait;
 use futures::channel::mpsc;
 use futures::compat::Future01CompatExt;
+use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 
 #[derive(Debug)]
@@ -170,25 +172,39 @@ impl ConnectionManagerTrait for Arc<ConnectionManagerSelective> {
             let Some(mut disconnection_notification) = manager.active_address_disconnection_receiver.lock().unwrap().take() else { return };
             loop {
                 let Some(client) = manager.get_client() else { return };
-                // We are disconnected at the point, try to connect to a server.
-                // List all the primary connections first, then the secondary ones.
-                let connections = manager
+                // We are disconnected at this point, try to connect to a server.
+                let available_connections = manager
+                    // List all the primary connections first,
                     .get_primary_connections()
-                    .chain(manager.get_secondary_connections());
-
-                for connection in connections {
-                    let Some(connection_ctx) = manager.connections.get(connection.address()) else { continue };
-                    // Try to connect to the server if it's not suspended.
-                    if now_ms() >= connection_ctx.suspend_until() {
-                        let address = connection.address().to_string();
-                        if ElectrumConnection::establish_connection_loop(connection, client.clone())
-                            .await
-                            .is_ok()
-                        {
-                            // We are connected, mark the connection as active.
-                            *manager.active_address.lock().unwrap() = Some(address);
-                            break;
+                    // then the secondary ones.
+                    .chain(manager.get_secondary_connections())
+                    // Filter out the suspended connections.
+                    .filter(|connection| {
+                        if let Some(connection_ctx) = manager.connections.get(connection.address()) {
+                            if now_ms() >= connection_ctx.suspend_until() {
+                                return true;
+                            }
                         }
+                        false
+                    });
+                // Map each connection to a future that tries to establish it.
+                let connection_loops = available_connections.map(|connection| {
+                    let client = client.clone();
+                    async move {
+                        let address = connection.address().to_string();
+                        ElectrumConnection::establish_connection_loop(connection, client)
+                            .await
+                            .map(|_| address)
+                    }
+                });
+                // Create an unordered stream of connection loops which will yield connection results as they become ready.
+                let mut connection_loops = FuturesUnordered::from_iter(connection_loops);
+                // Poll any ready connection.
+                while let Some(connection_result) = connection_loops.next().await {
+                    // And register it as the active connection if it was connected successfully.
+                    if let Ok(address) = connection_result {
+                        *manager.active_address.lock().unwrap() = Some(address);
+                        break;
                     }
                 }
 
