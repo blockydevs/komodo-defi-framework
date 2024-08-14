@@ -173,22 +173,33 @@ impl ConnectionManagerTrait for Arc<ConnectionManagerSelective> {
             loop {
                 let Some(client) = manager.get_client() else { return };
                 // We are disconnected at this point, try to connect to a server.
-                let available_connections = manager
-                    // List all the primary connections first,
-                    .get_primary_connections()
-                    // then the secondary ones.
-                    .chain(manager.get_secondary_connections())
-                    // Filter out the suspended connections.
-                    .filter(|connection| {
-                        if let Some(connection_ctx) = manager.connections.get(connection.address()) {
-                            if now_ms() >= connection_ctx.suspend_until() {
-                                return true;
+                let available_connections = {
+                    let available_connections: Vec<_> = manager
+                        // List all the primary connections first,
+                        .get_primary_connections()
+                        // then the secondary ones.
+                        .chain(manager.get_secondary_connections())
+                        // Filter out the suspended connections.
+                        .filter(|connection| {
+                            if let Some(connection_ctx) = manager.connections.get(connection.address()) {
+                                if now_ms() >= connection_ctx.suspend_until() {
+                                    return true;
+                                }
                             }
-                        }
-                        false
-                    });
+                            false
+                        })
+                        .collect();
+
+                    // If all the connections are suspended, use all the connections available.
+                    // We shouldn't operate with no connections at all.
+                    if available_connections.is_empty() {
+                        manager.get_all_connections()
+                    } else {
+                        available_connections
+                    }
+                };
                 // Map each connection to a future that tries to establish it.
-                let connection_loops = available_connections.map(|connection| {
+                let connection_loops = available_connections.into_iter().map(|connection| {
                     let client = client.clone();
                     async move {
                         let address = connection.address().to_string();
