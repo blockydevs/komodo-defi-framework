@@ -354,19 +354,20 @@ impl ElectrumClient {
             }
             final_response.ok_or(errors)
         };
-        #[cfg(not(test))]
-        // Try to perform the request endlessly till we succeed.
-        loop {
-            if let Ok((address, response)) = send_request().await {
-                return Ok((address, response));
+        if cfg!(not(test)) {
+            // Try to perform the request endlessly till we succeed.
+            loop {
+                if let Ok((address, response)) = send_request().await {
+                    return Ok((address, response));
+                }
+                Timer::sleep(0.5).await;
             }
-            Timer::sleep(0.5).await;
-        }
-        #[cfg(test)]
-        // In tests, we don't want to loop endlessly.
-        match send_request().await {
-            Ok((address, response)) => Ok((address, response)),
-            Err(errors) => Err(JsonRpcErrorType::Internal(format!("All server errored: {errors:?}"))),
+        } else {
+            // In tests, we don't want to loop endlessly.
+            match send_request().await {
+                Ok((address, response)) => Ok((address, response)),
+                Err(errors) => Err(JsonRpcErrorType::Internal(format!("All server errored: {errors:?}"))),
+            }
         }
     }
 
