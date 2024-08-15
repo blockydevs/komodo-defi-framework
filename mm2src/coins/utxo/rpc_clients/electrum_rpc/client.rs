@@ -18,7 +18,7 @@ use common::executor::Timer;
 use common::jsonrpc_client::{JsonRpcBatchClient, JsonRpcClient, JsonRpcError, JsonRpcErrorType, JsonRpcMultiClient,
                              JsonRpcRemoteAddr, JsonRpcRequest, JsonRpcRequestEnum, JsonRpcResponseEnum,
                              JsonRpcResponseFut, RpcRes};
-use common::log::error;
+use common::log::{error, warn};
 use common::{median, OrdRange};
 use keys::hash::H256;
 use keys::Address;
@@ -36,6 +36,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::convert::TryInto;
 use std::fmt::Debug;
+use std::iter::FromIterator;
 use std::num::NonZeroU64;
 use std::ops::Deref;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
@@ -45,6 +46,8 @@ use async_trait::async_trait;
 use futures::channel::mpsc::UnboundedSender;
 use futures::compat::Future01CompatExt;
 use futures::future::{join_all, FutureExt, TryFutureExt};
+use futures::stream::FuturesUnordered;
+use futures::StreamExt;
 use futures01::Future;
 use itertools::Itertools;
 use serde_json::{self as json, Value as Json};
@@ -281,12 +284,16 @@ impl ElectrumClient {
         )?);
 
         // Wait till we have some connection(s) available.
+        // FIXME: This is added for the tests to pass. Should we make this a cfg(test) only?
+        // We will need to change the coin activation though to not fail the activation if
+        // initial balance query fails (and it will probably fail because by then we won't have
+        // enough time to establish at least one connection).
         client
             .connection_manager
             .wait_till_connected(5.)
             .await
             // Connections might be temporarily unavailable, so we don't want to fail the client creation.
-            .map_err(|e| error!("{:?}", e))
+            .map_err(|e| error!("Failed to connect to any electrum server: {e:?}"))
             .ok();
 
         Ok(client)
@@ -297,6 +304,8 @@ impl ElectrumClient {
     /// A client with `ElectrumManagerPolicy::Multiple` will send the request to all active connected servers,
     /// which are *all* the servers if non of them is erroring (timeout, version mismatch, etc).
     /// A client with `ElectrumManagerPolicy::Selective` will send the request to the currently selected active server.
+    ///
+    /// This method will block until a response is received from at least one server.
     async fn electrum_request_multi(
         self,
         request: JsonRpcRequestEnum,
@@ -306,38 +315,45 @@ impl ElectrumClient {
         // Request id and serialized request.
         let req_id = request.rpc_id();
         let request = json::to_string(&request).map_err(|e| JsonRpcErrorType::InvalidRequest(e.to_string()))?;
-
-        let mut connections = vec![];
-        for _ in 0..10 {
-            connections = self.connection_manager.get_active_connections().await;
-            if !connections.is_empty() {
-                break;
+        // Try to perform the request endlessly till we succeed.
+        loop {
+            // Construct the requests to be sent to active connections.
+            let requests = self
+                .connection_manager
+                .get_active_connections()
+                .await
+                .into_iter()
+                .map(|connection| {
+                    let request = request.clone();
+                    let req_id = req_id.clone();
+                    async move {
+                        (
+                            JsonRpcRemoteAddr(connection.address().to_string()),
+                            connection
+                                .electrum_request(request, req_id, ELECTRUM_REQUEST_TIMEOUT)
+                                .await,
+                        )
+                    }
+                });
+            // Parallelize the requests in an unsorted fashion.
+            let mut requests = FuturesUnordered::from_iter(requests);
+            let mut final_response = None;
+            while let Some((address, response)) = requests.next().await {
+                match response {
+                    Ok(response) => {
+                        final_response = Some((address, response));
+                        if !send_to_all {
+                            break;
+                        }
+                    },
+                    Err(e) => warn!("Error from {address:?} while sending request: {e:?}"),
+                }
+            }
+            if let Some((address, response)) = final_response {
+                return Ok((address, response));
             }
             Timer::sleep(0.5).await;
-        };
-
-        let mut final_response = None;
-        let mut errors = vec![];
-        for connection in connections {
-            let address = connection.address().to_string();
-            match connection
-                .electrum_request(request.clone(), req_id.clone(), ELECTRUM_REQUEST_TIMEOUT)
-                .await
-            {
-                Ok(response) => {
-                    final_response = Some((JsonRpcRemoteAddr(address), response));
-                    // Break if we don't need to send the request to all the connections.
-                    if !send_to_all {
-                        break;
-                    }
-                },
-                Err(e) => errors.push((address, e)),
-            }
         }
-
-        final_response.ok_or_else(|| {
-            JsonRpcErrorType::Transport(format!("Failed to perform request {request:?} , errors: {errors:?}"))
-        })
     }
 
     /// Sends a JSONRPC request to a specific electrum server.
