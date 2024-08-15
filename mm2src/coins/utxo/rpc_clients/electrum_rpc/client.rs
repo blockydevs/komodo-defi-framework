@@ -315,8 +315,7 @@ impl ElectrumClient {
         // Request id and serialized request.
         let req_id = request.rpc_id();
         let request = json::to_string(&request).map_err(|e| JsonRpcErrorType::InvalidRequest(e.to_string()))?;
-        // Try to perform the request endlessly till we succeed.
-        loop {
+        let send_request = async || {
             // Construct the requests to be sent to active connections.
             let requests = self
                 .connection_manager
@@ -338,6 +337,7 @@ impl ElectrumClient {
             // Parallelize the requests in an unsorted fashion.
             let mut requests = FuturesUnordered::from_iter(requests);
             let mut final_response = None;
+            let mut errors = Vec::new();
             while let Some((address, response)) = requests.next().await {
                 match response {
                     Ok(response) => {
@@ -346,13 +346,27 @@ impl ElectrumClient {
                             break;
                         }
                     },
-                    Err(e) => warn!("Error from {address:?} while sending request: {e:?}"),
+                    Err(e) => {
+                        warn!("Error while sending request to {address:?}: {e:?}");
+                        errors.push((address, e))
+                    },
                 }
             }
-            if let Some((address, response)) = final_response {
+            final_response.ok_or(errors)
+        };
+        #[cfg(not(test))]
+        // Try to perform the request endlessly till we succeed.
+        loop {
+            if let Ok((address, response)) = send_request().await {
                 return Ok((address, response));
             }
             Timer::sleep(0.5).await;
+        }
+        #[cfg(test)]
+        // In tests, we don't want to loop endlessly.
+        match send_request().await {
+            Ok((address, response)) => Ok((address, response)),
+            Err(errors) => Err(JsonRpcErrorType::Internal(format!("All server errored: {errors:?}"))),
         }
     }
 
