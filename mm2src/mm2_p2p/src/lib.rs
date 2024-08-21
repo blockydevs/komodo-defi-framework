@@ -16,8 +16,8 @@ use sha2::{Digest, Sha256};
 pub use crate::swarm_runtime::SwarmRuntime;
 
 // atomicdex related re-exports
-pub use behaviours::atomicdex::{get_gossip_mesh, get_gossip_peer_topics, get_gossip_topic_peers, get_peers_info,
-                                get_relay_mesh, spawn_gossipsub, AdexBehaviourCmd, AdexBehaviourError,
+pub use behaviours::atomicdex::{get_gossip_mesh, get_gossip_peer_topics, get_gossip_topic_peers, get_relay_mesh,
+                                get_seeds_info, spawn_gossipsub, AdexBehaviourCmd, AdexBehaviourError,
                                 AdexBehaviourEvent, AdexCmdTx, AdexEventRx, AdexResponse, AdexResponseChannel,
                                 GossipsubEvent, GossipsubMessage, MessageId, NodeType, TopicHash, WssCerts};
 
