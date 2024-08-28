@@ -74,7 +74,9 @@ impl ProxySign {
             return false;
         }
 
-        let Ok(public_key) = PublicKey::try_decode_protobuf(&self.raw_message.public_key_encoded) else { return false };
+        let Ok(public_key) = PublicKey::try_decode_protobuf(&self.raw_message.public_key_encoded) else {
+            return false;
+        };
 
         if self.address != public_key.to_peer_id().to_string() {
             return false;

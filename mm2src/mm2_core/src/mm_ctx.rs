@@ -288,9 +288,11 @@ impl MmCtx {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    pub fn db_root(&self) -> PathBuf { path_to_db_root(self.conf["dbdir"].as_str()) }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn wallet_file_path(&self, wallet_name: &str) -> PathBuf {
-        let db_root = path_to_db_root(self.conf["dbdir"].as_str());
-        db_root.join(wallet_name.to_string() + ".dat")
+        self.db_root().join(wallet_name.to_string() + ".dat")
     }
 
     /// MM database path.  

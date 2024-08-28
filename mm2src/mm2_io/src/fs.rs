@@ -192,19 +192,49 @@ where
     json::from_slice(&content).map_to_mm(FsJsonError::Deserializing)
 }
 
-/// Read the `dir_path` entries trying to deserialize each as the `T` type.
+async fn filter_files_with_extension(dir_path: &Path, extension: &str) -> IoResult<Vec<PathBuf>> {
+    let ext = Some(OsStr::new(extension));
+    let entries = read_dir_async(dir_path)
+        .await?
+        .into_iter()
+        .filter(|path| path.extension() == ext)
+        .collect();
+    Ok(entries)
+}
+
+/// Reads the file names with the specified extension from the given directory path.
+pub async fn read_file_names_with_extension(dir_path: &Path, extension: &str) -> IoResult<Vec<String>> {
+    let entries = filter_files_with_extension(dir_path, extension).await?;
+    let file_names: Vec<String> = entries
+        .into_iter()
+        .filter_map(|path| path.file_name().and_then(|name| name.to_str().map(|s| s.to_string())))
+        .collect();
+
+    Ok(file_names)
+}
+
+/// Reads the file stems with the specified extension from the given directory path.
+/// The stem is the file name without the extension.
+pub async fn read_file_stems_with_extension(dir_path: &Path, extension: &str) -> IoResult<Vec<String>> {
+    let entries = filter_files_with_extension(dir_path, extension).await?;
+    let file_names: Vec<String> = entries
+        .into_iter()
+        .filter_map(|path| path.file_stem().and_then(|stem| stem.to_str().map(|s| s.to_string())))
+        .collect();
+
+    Ok(file_names)
+}
+
+/// Read the `dir_path` entries trying to deserialize each as the `T` type,
+/// filtering by the specified extension.
 /// Please note that files that couldn't be deserialized are skipped.
-pub async fn read_dir_json<T>(dir_path: &Path) -> FsJsonResult<Vec<T>>
+pub async fn read_files_with_extension<T>(dir_path: &Path, extension: &str) -> FsJsonResult<Vec<T>>
 where
     T: DeserializeOwned,
 {
-    let json_ext = Some(OsStr::new("json"));
-    let entries: Vec<_> = read_dir_async(dir_path)
+    let entries = filter_files_with_extension(dir_path, extension)
         .await
-        .mm_err(FsJsonError::IoReading)?
-        .into_iter()
-        .filter(|path| path.extension() == json_ext)
-        .collect();
+        .mm_err(FsJsonError::IoReading)?;
     let type_name = std::any::type_name::<T>();
 
     let mut result = Vec::new();
@@ -231,6 +261,15 @@ where
         };
     }
     Ok(result)
+}
+
+/// Read the `dir_path` entries trying to deserialize each as the `T` type from JSON files.
+/// Please note that files that couldn't be deserialized are skipped.
+pub async fn read_dir_json<T>(dir_path: &Path) -> FsJsonResult<Vec<T>>
+where
+    T: DeserializeOwned,
+{
+    read_files_with_extension(dir_path, "json").await
 }
 
 pub async fn write_json<T>(t: &T, path: &Path, use_tmp_file: bool) -> FsJsonResult<()>
