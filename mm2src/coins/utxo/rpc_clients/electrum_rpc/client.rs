@@ -327,32 +327,34 @@ impl ElectrumClient {
                     let req_id = req_id.clone();
                     async move {
                         (
-                            JsonRpcRemoteAddr(connection.address().to_string()),
                             connection
                                 .electrum_request(request, req_id, ELECTRUM_REQUEST_TIMEOUT)
                                 .await,
+                            connection,
                         )
                     }
                 });
             // Parallelize the requests in an unsorted fashion.
             let mut requests = FuturesUnordered::from_iter(requests);
-            let mut final_response = None;
             let mut errors = Vec::new();
-            while let Some((address, response)) = requests.next().await {
+            while let Some((response, connection)) = requests.next().await {
+                let address = JsonRpcRemoteAddr(connection.address().to_string());
                 match response {
                     Ok(response) => {
-                        final_response = Some((address, response));
                         if !send_to_all {
-                            break;
+                            return Ok((address, response));
                         }
                     },
                     Err(e) => {
                         warn!("Error while sending request to {address:?}: {e:?}");
+                        // Trigger a disconnect for this connection because it failed.
+                        // In selective mode, this means we get a different connection next time.
+                        connection.trigger_disconnect().await;
                         errors.push((address, e))
                     },
                 }
             }
-            final_response.ok_or(errors)
+            Err(errors)
         };
         if cfg!(not(test)) {
             // Try to perform the request endlessly till we succeed.

@@ -205,6 +205,15 @@ impl ElectrumConnection {
         self.abortable_system.abort_all_and_reset().ok();
     }
 
+    /// Triggers the connection loop to disconnect.
+    ///
+    /// This happens by dropping the send channel to the electrum connection which means it can
+    /// no longer be used to send requests to the electrum server.
+    pub async fn trigger_disconnect(&self) {
+        // By clearing `tx`, the writer branch of the connection loop will terminate, and thus terminating the connection.
+        self.tx.lock().await.take();
+    }
+
     /// Sends a request to the electrum server and waits for the response.
     ///
     /// ## Important: This should always return [`JsonRpcErrorType::Transport`] error.
