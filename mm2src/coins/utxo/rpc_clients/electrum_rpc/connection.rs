@@ -1,5 +1,6 @@
 use super::client::ElectrumClient;
-use super::constants::{CUTOFF_TIMEOUT, DEFAULT_CONNECTION_ESTABLISHMENT_TIMEOUT};
+use super::constants::{BLOCKCHAIN_HEADERS_SUB_ID, BLOCKCHAIN_SCRIPTHASH_SUB_ID, CUTOFF_TIMEOUT,
+                       DEFAULT_CONNECTION_ESTABLISHMENT_TIMEOUT};
 
 use crate::{RpcTransportEventHandler, SharableRpcTransportEventHandler};
 use common::custom_futures::timeout::FutureTimerExt;
@@ -300,19 +301,14 @@ impl ElectrumConnection {
             ElectrumRpcResponseEnum::SingleResponse(single) => JsonRpcResponseEnum::Single(single),
             ElectrumRpcResponseEnum::BatchResponses(batch) => JsonRpcResponseEnum::Batch(batch),
             ElectrumRpcResponseEnum::SubscriptionNotification(req) => {
-                // NOTE: Sending a script hash notification is handled in it's own event handler.
-
-                // FIXME: What is this used for? Note that the id is the method name in this case (two similar id will collide),
-                // but this isn't a response to any request anyways, this is a notification, and we forwarded using the
-                // scripthash_notification_sender above already.
-                JsonRpcResponseEnum::Single(JsonRpcResponse {
-                    id: req.method.clone(),
-                    jsonrpc: "2.0".into(),
-                    result: req.params[0].clone(),
-                    error: Json::Null,
-                })
-                //return; // BLOCKCHAIN_HEADERS_SUB_ID wasn't handled, just returned.
-                //also, you might want to check the notification type to print an error message if it's not expected
+                match req.method.as_str() {
+                    // NOTE: Sending a script hash notification is handled in it's own event handler.
+                    BLOCKCHAIN_SCRIPTHASH_SUB_ID | BLOCKCHAIN_HEADERS_SUB_ID => {},
+                    _ => {
+                        error!("Unexpected notification method: {}", req.method);
+                    },
+                }
+                return;
             },
         };
 
@@ -599,8 +595,7 @@ impl ElectrumConnection {
                         ElectrumConnectionErr::VersionMismatch(client.protocol_version().clone(), version_f32)
                     },
                     Err(e) => {
-                        // FIXME: Relax the error type here?
-                        ElectrumConnectionErr::Irrecoverable(format!("Failed to parse electrum server version {e:?}"))
+                        ElectrumConnectionErr::Temporary(format!("Failed to parse electrum server version {e:?}"))
                     },
                 },
                 Err(e) => ElectrumConnectionErr::Temporary(format!("Error querying electrum server version {e:?}")),
@@ -841,8 +836,7 @@ impl ElectrumConnection {
                         ElectrumConnectionErr::VersionMismatch(client.protocol_version().clone(), version_f32)
                     },
                     Err(e) => {
-                        // FIXME: Relax the error type here?
-                        ElectrumConnectionErr::Irrecoverable(format!("Failed to parse electrum server version {e:?}"))
+                        ElectrumConnectionErr::Temporary(format!("Failed to parse electrum server version {e:?}"))
                     },
                 },
                 Err(e) => ElectrumConnectionErr::Temporary(format!("Error querying electrum server version {e:?}")),
