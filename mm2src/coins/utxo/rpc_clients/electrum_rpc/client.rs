@@ -1,7 +1,7 @@
 use super::super::{BlockHashOrHeight, EstimateFeeMethod, EstimateFeeMode, SpentOutputInfo, UnspentInfo, UnspentMap,
                    UtxoJsonRpcClientInfo, UtxoRpcClientOps, UtxoRpcError, UtxoRpcFut};
-use super::connection::{ElectrumConnection, ElectrumConnectionSettings};
-use super::connection_manager::{ConnectionManager};
+use super::connection::{ElectrumConnection, ElectrumConnectionErr, ElectrumConnectionSettings};
+use super::connection_manager::ConnectionManager;
 use super::constants::{BLOCKCHAIN_HEADERS_SUB_ID, BLOCKCHAIN_SCRIPTHASH_SUB_ID, ELECTRUM_REQUEST_TIMEOUT,
                        NO_FORCE_CONNECT_METHODS, SEND_TO_ALL_METHODS};
 use super::electrum_script_hash;
@@ -10,8 +10,9 @@ use super::rpc_responses::*;
 
 use crate::utxo::rpc_clients::ConcurrentRequestMap;
 use crate::utxo::utxo_block_header_storage::BlockHeaderStorage;
-use crate::utxo::{output_script, output_script_p2pk, GetBlockHeaderError, GetConfirmedTxError,
-                  GetTxHeightError, ScripthashNotification};
+use crate::utxo::{output_script, output_script_p2pk, GetBlockHeaderError, GetConfirmedTxError, GetTxHeightError,
+                  ScripthashNotification};
+use crate::RpcTransportEventHandler;
 use crate::SharableRpcTransportEventHandler;
 use chain::{BlockHeader, Transaction as UtxoTx, TxHashAlgo};
 use common::executor::abortable_queue::{AbortableQueue, WeakSpawner};
@@ -341,8 +342,12 @@ impl ElectrumClient {
                     },
                     Err(e) => {
                         warn!("Error while sending request to {address:?}: {e:?}");
-                        // Trigger a disconnect for this connection because it failed.
-                        connection.trigger_disconnect().await;
+                        connection
+                            .disconnect(Some(ElectrumConnectionErr::Temporary(format!(
+                                "Forcefully disconnected for erroring: {e:?}."
+                            ))))
+                            .await;
+                        self.event_handlers.on_disconnected(connection.address()).ok();
                         errors.push((address, e))
                     },
                 }
