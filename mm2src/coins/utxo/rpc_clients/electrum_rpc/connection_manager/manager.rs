@@ -478,15 +478,26 @@ impl ConnectionManager {
                 while let Some(connection_result) = connection_loops.next().await {
                     // If the connection was established successfully, we can consider maintaining it.
                     if let Ok(address) = connection_result {
-                        let mut maintained_connections = self.maintained_connections().write().unwrap();
                         // Add the successfully connected connection to the maintained connections.
-                        if let Some(conn_ctx) = self.connections().get(&address) {
+                        let conn_ctx = unwrap_or_continue!(self.connections().get(&address));
+                        let maintained_connections = self.maintained_connections().read().unwrap();
+                        let maintained_connections_size = maintained_connections.len() as u32;
+                        let lowest_priority_connection_id =
+                            *maintained_connections.keys().next_back().unwrap_or(Some(&u32::MAX)).0;
+                        // NOTE: Must drop to avoid deadlock with the write lock below.
+                        drop(maintained_connections);
+                        // We don't write-lock the maintained connections unless we know we will add this connection.
+                        // That is, we can add it because we didn't hit the `max_connected` threshold,
+                        if maintained_connections_size < self.config().max_connected
+                        // or we can add it because it is of a higher priority than the lowest priority connection.
+                            || conn_ctx.id < lowest_priority_connection_id
+                        {
+                            let mut maintained_connections = self.maintained_connections().write().unwrap();
                             maintained_connections.insert(conn_ctx.id, address);
-                        }
-                        // If we passed the `max_connected` threshold, we need to drop the lowest priority connection (might be the one we just added).
-                        if (maintained_connections.len() as u32) > self.config().max_connected {
-                            let lowest_priority_connection_id = *maintained_connections.iter().next_back().unwrap().0;
-                            maintained_connections.remove(&lowest_priority_connection_id);
+                            // If we have reached the `max_connected` threshold then remove the lowest priority connection.
+                            if !maintained_connections_size < self.config().max_connected {
+                                maintained_connections.remove(&lowest_priority_connection_id);
+                            }
                         }
                     }
                 }
