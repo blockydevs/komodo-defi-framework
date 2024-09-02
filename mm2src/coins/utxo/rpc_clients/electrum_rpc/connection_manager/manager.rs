@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, HashMap};
-use std::iter::FromIterator;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use super::super::client::{ElectrumClient, ElectrumClientImpl};
@@ -15,8 +14,7 @@ use common::now_ms;
 use keys::Address;
 
 use futures::compat::Future01CompatExt;
-use futures::stream::FuturesUnordered;
-use futures::{FutureExt, StreamExt};
+use futures::FutureExt;
 use instant::Instant;
 
 /// A macro to unwrap an option and *execute* some code if the option is None.
@@ -454,42 +452,27 @@ impl ConnectionManager {
                 }
             };
 
-            // Establish the connections to the selected candidates and alter the maintained connections accordingly.
+            // Establish the connections to the selected candidates and alter the maintained connections set accordingly.
             {
                 let client = unwrap_or_return!(self.get_client());
-                // Map each connection to a future that tries to establish it.
-                let connection_loops = candidate_connections.into_iter().map(|connection| {
-                    let client = client.clone();
-                    async move {
-                        let address = connection.address().to_string();
-                        // The connection might be connected for whatever reason (was used a short time ago, was queried by address, etc...).
-                        // Save some time and don't try to establish it again.
-                        if connection.is_connected().await {
-                            Ok(address)
-                        } else {
-                            ElectrumConnection::establish_connection_loop(connection, client)
-                                .await
-                                .map(|_| address)
-                        }
-                    }
-                });
-                // Create an unordered stream of connection loops which will yield connection results as they become ready.
-                let mut connection_loops = FuturesUnordered::from_iter(connection_loops);
-                while let Some(connection_result) = connection_loops.next().await {
-                    // If the connection was established successfully, we can consider maintaining it.
-                    if let Ok(address) = connection_result {
-                        // Add the successfully connected connection to the maintained connections.
+                for connection in candidate_connections {
+                    let address = connection.address().to_string();
+                    if connection.is_connected().await
+                        || ElectrumConnection::establish_connection_loop(connection, client.clone())
+                            .await
+                            .is_ok()
+                    {
                         let conn_ctx = unwrap_or_continue!(self.connections().get(&address));
                         let maintained_connections = self.maintained_connections().read().unwrap();
                         let maintained_connections_size = maintained_connections.len() as u32;
                         let lowest_priority_connection_id =
-                            *maintained_connections.keys().next_back().unwrap_or(Some(&u32::MAX)).0;
+                            *maintained_connections.keys().next_back().unwrap_or(&u32::MAX);
                         // NOTE: Must drop to avoid deadlock with the write lock below.
                         drop(maintained_connections);
                         // We don't write-lock the maintained connections unless we know we will add this connection.
                         // That is, we can add it because we didn't hit the `max_connected` threshold,
-                        if maintained_connections_size < self.config().max_connected
                         // or we can add it because it is of a higher priority than the lowest priority connection.
+                        if maintained_connections_size < self.config().max_connected
                             || conn_ctx.id < lowest_priority_connection_id
                         {
                             let mut maintained_connections = self.maintained_connections().write().unwrap();
@@ -504,9 +487,9 @@ impl ConnectionManager {
             }
 
             // Only sleep if we successfully acquired the minimum number of connections,
+            // or if we know we can never maintain `min_connected` connections; there is no point of infinite non-wait looping then.
             if self.maintained_connections().read().unwrap().len() as u32 > self.config().min_connected
-                // or if we know we can never maintain `min_connected` connections; there is no point of infinite non-wait looping then.
-                    || will_never_get_min_connected
+                || will_never_get_min_connected
             {
                 // Wait for a timeout or a below `min_connected` notification before doing another round of house keeping.
                 futures::select! {
