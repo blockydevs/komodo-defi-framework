@@ -2,7 +2,7 @@ use sha2::{Digest, Sha256};
 
 mod client;
 mod connection;
-mod connection_managers;
+mod connection_manager;
 mod constants;
 mod event_handlers;
 mod rpc_responses;

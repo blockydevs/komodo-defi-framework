@@ -1,4 +1,4 @@
-use super::connection_managers::ConnectionManagerTrait;
+use super::connection_manager::ConnectionManager;
 use super::constants::BLOCKCHAIN_SCRIPTHASH_SUB_ID;
 
 use crate::utxo::ScripthashNotification;
@@ -46,7 +46,7 @@ impl RpcTransportEventHandler for ElectrumScriptHashNotificationBridge {
 /// When a connection is connected or disconnected, this event handler will notify the `ConnectionManager`
 /// to handle the the event.
 pub struct ElectrumConnectionManagerNotifier {
-    pub connection_manager: Box<dyn ConnectionManagerTrait>,
+    pub connection_manager: ConnectionManager,
 }
 
 impl RpcTransportEventHandler for ElectrumConnectionManagerNotifier {

@@ -57,15 +57,18 @@ pub struct ConnectionContext {
     subs: Mutex<HashSet<Address>>,
     /// The timer deciding when the connection is ready to be used again.
     suspend_timer: SuspendTimer,
+    /// The ID of this connection which also serves as a priority (lower is better).
+    pub id: u32,
 }
 
 impl ConnectionContext {
     /// Creates a new connection context.
-    pub(super) fn new(connection: ElectrumConnection) -> Self {
+    pub(super) fn new(connection: ElectrumConnection, id: u32) -> Self {
         ConnectionContext {
             connection: Arc::new(connection),
             subs: Mutex::new(HashSet::new()),
             suspend_timer: SuspendTimer::new(),
+            id,
         }
     }
 
@@ -81,7 +84,7 @@ impl ConnectionContext {
     }
 
     /// Returns the time the server should be suspended until (when to take it up) in milliseconds.
-    pub(super) fn suspend_until(&self) -> u64 { self.suspend_timer.get_suspend_until() }
+    pub(super) fn suspended_till(&self) -> u64 { self.suspend_timer.get_suspend_until() }
 
     /// Adds a subscription to the connection context.
     pub(super) fn add_sub(&self, address: Address) { self.subs.lock().unwrap().insert(address); }

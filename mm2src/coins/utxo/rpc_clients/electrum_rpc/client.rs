@@ -1,15 +1,16 @@
 use super::super::{BlockHashOrHeight, EstimateFeeMethod, EstimateFeeMode, SpentOutputInfo, UnspentInfo, UnspentMap,
                    UtxoJsonRpcClientInfo, UtxoRpcClientOps, UtxoRpcError, UtxoRpcFut};
 use super::connection::{ElectrumConnection, ElectrumConnectionSettings};
-use super::connection_managers::{ConnectionManagerMultiple, ConnectionManagerSelective, ConnectionManagerTrait};
-use super::constants::{BLOCKCHAIN_HEADERS_SUB_ID, BLOCKCHAIN_SCRIPTHASH_SUB_ID, ELECTRUM_REQUEST_TIMEOUT};
+use super::connection_manager::{ConnectionManager};
+use super::constants::{BLOCKCHAIN_HEADERS_SUB_ID, BLOCKCHAIN_SCRIPTHASH_SUB_ID, ELECTRUM_REQUEST_TIMEOUT,
+                       NO_FORCE_CONNECT_METHODS, SEND_TO_ALL_METHODS};
 use super::electrum_script_hash;
 use super::event_handlers::{ElectrumConnectionManagerNotifier, ElectrumScriptHashNotificationBridge};
 use super::rpc_responses::*;
 
 use crate::utxo::rpc_clients::ConcurrentRequestMap;
 use crate::utxo::utxo_block_header_storage::BlockHeaderStorage;
-use crate::utxo::{output_script, output_script_p2pk, ElectrumManagerPolicy, GetBlockHeaderError, GetConfirmedTxError,
+use crate::utxo::{output_script, output_script_p2pk, GetBlockHeaderError, GetConfirmedTxError,
                   GetTxHeightError, ScripthashNotification};
 use crate::SharableRpcTransportEventHandler;
 use chain::{BlockHeader, Transaction as UtxoTx, TxHashAlgo};
@@ -63,14 +64,17 @@ pub struct ElectrumClientSettings {
     pub coin_ticker: String,
     pub negotiate_version: bool,
     pub spawn_ping: bool,
-    pub connection_manager_policy: ElectrumManagerPolicy,
+    /// Minimum number of connections to keep alive at all times (best effort).
+    pub min_connected: u32,
+    /// Maximum number of connections to keep alive at any time.
+    pub max_connected: u32,
 }
 
 #[derive(Debug)]
 pub struct ElectrumClientImpl {
     client_name: String,
     coin_ticker: String,
-    pub connection_manager: Box<dyn ConnectionManagerTrait>,
+    pub connection_manager: ConnectionManager,
     next_id: AtomicU64,
     negotiate_version: bool,
     protocol_version: OrdRange<f32>,
@@ -102,21 +106,15 @@ impl ElectrumClientImpl {
             }));
         }
 
-        let connection_manager: Box<dyn ConnectionManagerTrait> = match client_settings.connection_manager_policy {
-            ElectrumManagerPolicy::Selective => Box::new(ConnectionManagerSelective::try_new_arc(
-                client_settings.servers,
-                client_settings.spawn_ping,
-                &abortable_system,
-            )?),
-            ElectrumManagerPolicy::Multiple => Box::new(ConnectionManagerMultiple::try_new_arc(
-                client_settings.servers,
-                client_settings.spawn_ping,
-                &abortable_system,
-            )?),
-        };
+        let connection_manager = ConnectionManager::try_new(
+            client_settings.servers,
+            client_settings.spawn_ping,
+            (client_settings.min_connected, client_settings.max_connected),
+            &abortable_system,
+        )?;
 
         event_handlers.push(Box::new(ElectrumConnectionManagerNotifier {
-            connection_manager: connection_manager.copy(),
+            connection_manager: connection_manager.clone(),
         }));
 
         Ok(ElectrumClientImpl {
@@ -301,17 +299,13 @@ impl ElectrumClient {
 
     /// Sends a JSONRPC request to all the connected servers.
     ///
-    /// A client with `ElectrumManagerPolicy::Multiple` will send the request to all active connected servers,
-    /// which are *all* the servers if non of them is erroring (timeout, version mismatch, etc).
-    /// A client with `ElectrumManagerPolicy::Selective` will send the request to the currently selected active server.
-    ///
     /// This method will block until a response is received from at least one server.
     async fn electrum_request_multi(
         self,
         request: JsonRpcRequestEnum,
     ) -> Result<(JsonRpcRemoteAddr, JsonRpcResponseEnum), JsonRpcErrorType> {
-        // Whether to send the request to all the connections or not.
-        let send_to_all = matches!(request, JsonRpcRequestEnum::Single(ref req) if req.method == "server.ping");
+        // Whether to send the request to all active connections or not.
+        let send_to_all = matches!(request, JsonRpcRequestEnum::Single(ref req) if SEND_TO_ALL_METHODS.contains(&req.method.as_str()));
         // Request id and serialized request.
         let req_id = request.rpc_id();
         let request = json::to_string(&request).map_err(|e| JsonRpcErrorType::InvalidRequest(e.to_string()))?;
@@ -348,7 +342,6 @@ impl ElectrumClient {
                     Err(e) => {
                         warn!("Error while sending request to {address:?}: {e:?}");
                         // Trigger a disconnect for this connection because it failed.
-                        // In selective mode, this means we get a different connection next time.
                         connection.trigger_disconnect().await;
                         errors.push((address, e))
                     },
@@ -381,12 +374,11 @@ impl ElectrumClient {
         to_addr: String,
         request: JsonRpcRequestEnum,
     ) -> Result<JsonRpcResponseEnum, JsonRpcErrorType> {
-        // A server should already be connected if we are querying for its version.
-        let dont_force_connect =
-            matches!(request, JsonRpcRequestEnum::Single(ref req) if req.method == "server.version");
+        // Whether to force the connection to be established (if not) before sending the request.
+        let force_connect = !matches!(request, JsonRpcRequestEnum::Single(ref req) if NO_FORCE_CONNECT_METHODS.contains(&req.method.as_str()));
         let connection = self
             .connection_manager
-            .get_connection_by_address(&to_addr, !dont_force_connect)
+            .get_connection_by_address(&to_addr, force_connect)
             .await
             .map_err(|err| JsonRpcErrorType::Internal(err.to_string()))?;
 

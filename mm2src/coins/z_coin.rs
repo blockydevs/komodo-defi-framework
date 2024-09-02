@@ -19,10 +19,9 @@ use crate::utxo::utxo_builder::{UtxoCoinBuilder, UtxoCoinBuilderCommonOps, UtxoF
 use crate::utxo::utxo_common::{addresses_from_script, big_decimal_from_sat};
 use crate::utxo::utxo_common::{big_decimal_from_sat_unsigned, payment_script};
 use crate::utxo::{sat_from_big_decimal, utxo_common, ActualTxFee, AdditionalTxData, AddrFromStrError, Address,
-                  BroadcastTxErr, ElectrumManagerPolicy, FeePolicy, GetUtxoListOps, HistoryUtxoTx, HistoryUtxoTxMap,
-                  MatureUnspentList, RecentlySpentOutPointsGuard, UtxoActivationParams, UtxoAddressFormat, UtxoArc,
-                  UtxoCoinFields, UtxoCommonOps, UtxoRpcMode, UtxoTxBroadcastOps, UtxoTxGenerationOps,
-                  VerboseTransactionFrom};
+                  BroadcastTxErr, FeePolicy, GetUtxoListOps, HistoryUtxoTx, HistoryUtxoTxMap, MatureUnspentList,
+                  RecentlySpentOutPointsGuard, UtxoActivationParams, UtxoAddressFormat, UtxoArc, UtxoCoinFields,
+                  UtxoCommonOps, UtxoRpcMode, UtxoTxBroadcastOps, UtxoTxGenerationOps, VerboseTransactionFrom};
 use crate::utxo::{UnsupportedAddr, UtxoFeeDetails};
 use crate::z_coin::storage::{BlockDbImpl, WalletDbShared};
 use crate::z_coin::z_balance_streaming::ZBalanceEventHandler;
@@ -751,8 +750,12 @@ pub enum ZcoinRpcMode {
     #[serde(alias = "Electrum")]
     Light {
         #[serde(alias = "servers")]
+        /// The settings of each electrum server.
         electrum_servers: Vec<ElectrumConnectionSettings>,
-        policy: ElectrumManagerPolicy,
+        /// The minimum number of connections to electrum servers to keep alive/maintained at all times.
+        min_connected: Option<u32>,
+        /// The maximum number of connections to electrum servers to not exceed at any time.
+        max_connected: Option<u32>,
         light_wallet_d_servers: Vec<String>,
         /// Specifies the parameters for synchronizing the wallet from a specific block. This overrides the
         /// `CheckPointBlockInfo` configuration in the coin settings.
@@ -971,11 +974,13 @@ impl<'a> ZCoinBuilder<'a> {
             ZcoinRpcMode::Native => UtxoRpcMode::Native,
             ZcoinRpcMode::Light {
                 electrum_servers,
-                policy,
+                min_connected,
+                max_connected,
                 ..
             } => UtxoRpcMode::Electrum {
                 servers: electrum_servers.clone(),
-                policy: policy.clone(),
+                min_connected: *min_connected,
+                max_connected: *max_connected,
             },
         };
         let utxo_params = UtxoActivationParams {

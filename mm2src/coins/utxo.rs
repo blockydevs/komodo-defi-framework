@@ -1413,7 +1413,6 @@ pub struct UtxoActivationParams {
 pub enum UtxoFromLegacyReqErr {
     UnexpectedMethod,
     InvalidElectrumServers(json::Error),
-    InvalidElectrumManagerPolicy(json::Error),
     InvalidMergeParams(json::Error),
     InvalidBlockHeaderVerificationParams(json::Error),
     InvalidRequiredConfs(json::Error),
@@ -1434,14 +1433,13 @@ impl UtxoActivationParams {
             Some("electrum") => {
                 let servers =
                     json::from_value(req["servers"].clone()).map_to_mm(UtxoFromLegacyReqErr::InvalidElectrumServers)?;
-                let policy = if req["policy"].is_null() {
-                    ElectrumManagerPolicy::Multiple
-                } else {
-                    json::from_value(req["policy"].clone())
-                        .map_to_mm(UtxoFromLegacyReqErr::InvalidElectrumManagerPolicy)?
-                };
-
-                UtxoRpcMode::Electrum { servers, policy }
+                let min_connected = req["min_connected"].as_u64().map(|m| m as u32);
+                let max_connected = req["max_connected"].as_u64().map(|m| m as u32);
+                UtxoRpcMode::Electrum {
+                    servers,
+                    min_connected,
+                    max_connected,
+                }
             },
             _ => return MmError::err(UtxoFromLegacyReqErr::UnexpectedMethod),
         };
@@ -1489,25 +1487,17 @@ impl UtxoActivationParams {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Display, Serialize)]
-#[serde(rename_all = "lowercase")]
-/// The Electrum selection policy to use.
-///
-/// Multiple: All connections are activated simultaneously.
-/// Selective: Only one connection is activated at a time (until it fails).
-pub enum ElectrumManagerPolicy {
-    #[default]
-    Multiple,
-    Selective,
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "rpc", content = "rpc_data")]
 pub enum UtxoRpcMode {
     Native,
     Electrum {
+        /// The settings of each electrum server.
         servers: Vec<ElectrumConnectionSettings>,
-        policy: ElectrumManagerPolicy,
+        /// The minimum number of connections to electrum servers to keep alive/maintained at all times.
+        min_connected: Option<u32>,
+        /// The maximum number of connections to electrum servers to not exceed at any time.
+        max_connected: Option<u32>,
     },
 }
 

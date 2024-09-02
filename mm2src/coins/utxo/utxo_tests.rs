@@ -86,7 +86,7 @@ pub fn electrum_client_for_test(servers: &[&str]) -> ElectrumClient {
 
     let servers = servers.into_iter().map(|s| json::from_value(s).unwrap()).collect();
     let abortable_system = AbortableQueue::default();
-    block_on(builder.electrum_client(abortable_system, args, servers, ElectrumManagerPolicy::Multiple, None)).unwrap()
+    block_on(builder.electrum_client(abortable_system, args, servers, (None, None), None)).unwrap()
 }
 
 /// Returned client won't work by default, requires some mocks to be usable
@@ -477,7 +477,8 @@ fn test_wait_for_payment_spend_timeout_electrum() {
         coin_ticker: TEST_COIN_NAME.into(),
         spawn_ping: true,
         negotiate_version: true,
-        connection_manager_policy: ElectrumManagerPolicy::Multiple,
+        min_connected: 1,
+        max_connected: 1,
     };
     let client = block_on(ElectrumClient::try_new(
         client_settings,
