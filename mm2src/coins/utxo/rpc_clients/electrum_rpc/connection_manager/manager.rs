@@ -10,7 +10,6 @@ use super::connection_context::ConnectionContext;
 use crate::utxo::rpc_clients::UtxoRpcClientOps;
 use common::executor::abortable_queue::AbortableQueue;
 use common::executor::{AbortableSystem, SpawnFuture, Timer};
-use common::log::warn;
 use common::notifier::{Notifiee, Notifier};
 use common::now_ms;
 use keys::Address;
@@ -19,6 +18,37 @@ use futures::compat::Future01CompatExt;
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt, StreamExt};
 use instant::Instant;
+
+/// A macro to unwrap an option and *execute* some code if the option is None.
+macro_rules! unwrap_or_else {
+    ($option:expr, $($action:tt)*) => {{
+        let Some(some_val) = $option else {
+            $($action)*;
+        };
+        some_val
+    }};
+}
+
+macro_rules! unwrap_or_continue {
+    ($option:expr) => {
+        unwrap_or_else!($option, continue)
+    };
+}
+
+macro_rules! unwrap_or_break {
+    ($option:expr) => {
+        unwrap_or_else!($option, break)
+    };
+}
+
+macro_rules! unwrap_or_return {
+    ($option:expr, $ret:expr) => {
+        unwrap_or_else!($option, return $ret)
+    };
+    ($option:expr) => {
+        unwrap_or_else!($option, return)
+    };
+}
 
 /// The ID of a connection (and also its priority, lower is better).
 type ID = u32;
@@ -136,9 +166,7 @@ impl ConnectionManager {
             return Err(ConnectionManagerErr::AlreadyInitialized);
         }
 
-        let Some(electrum_client) = weak_client.upgrade() else {
-            return Err(ConnectionManagerErr::NoClient);
-        };
+        let electrum_client = unwrap_or_return!(weak_client.upgrade(), Err(ConnectionManagerErr::NoClient));
 
         // Store the (weak) electrum client.
         *self.weak_client().write().unwrap() = Some(weak_client);
@@ -155,11 +183,22 @@ impl ConnectionManager {
     }
 
     // Abstractions over the accesses of the inner fields of the connection manager.
+    #[inline]
     fn config(&self) -> &ManagerConfig { &self.0.config }
+
+    #[inline]
     fn connections(&self) -> &HashMap<String, ConnectionContext> { &self.0.connections }
+
+    #[inline]
     fn weak_client(&self) -> &RwLock<Option<Weak<ElectrumClientImpl>>> { &self.0.electrum_client }
+
+    #[inline]
     fn maintained_connections(&self) -> &RwLock<BTreeMap<ID, String>> { &self.0.maintained_connections }
+
+    #[inline]
     fn notify_below_min_connected(&self) { self.0.below_min_connected_notifier.notify().ok(); }
+
+    #[inline]
     fn extract_below_min_connected_notifiee(&self) -> Option<Notifiee> {
         self.0.below_min_connected_notifiee.lock().unwrap().take()
     }
@@ -270,12 +309,9 @@ impl ConnectionManager {
     /// address when its script hash is notified.
     pub async fn add_subscriptions(&self, addresses: &HashMap<String, Address>) {
         for (scripthash, address) in addresses.iter() {
-            'outer: loop {
-                let Some(client) = self.get_client() else {
-                    // The manager is either not initialized or the client is dropped.
-                    // If the client is dropped, the manager is no longer usable.
-                    return;
-                };
+            // For a single address/scripthash, keep trying to subscribe it until we succeed.
+            'single_address_sub: loop {
+                let client = unwrap_or_return!(self.get_client());
                 let connections = self.get_active_connections().await;
                 if connections.is_empty() {
                     // If there are no active connections, wait for a connection to be established.
@@ -290,11 +326,9 @@ impl ConnectionManager {
                         .await
                         .is_ok()
                     {
-                        if let Some(connection_ctx) = self.connections().get(connection.address()) {
-                            connection_ctx.add_sub(address.clone());
-                            // Address subscribed successfully, move to the next one;
-                            break 'outer;
-                        }
+                        let connection_ctx = unwrap_or_continue!(self.connections().get(connection.address()));
+                        connection_ctx.add_sub(address.clone());
+                        break 'single_address_sub;
                     }
                 }
             }
@@ -303,10 +337,7 @@ impl ConnectionManager {
 
     // Handles the connection event.
     pub fn on_connected(&self, server_address: &str) {
-        let Some(connection_ctx) = self.connections().get(server_address) else {
-                warn!("No connection found for address: {server_address}");
-                return;
-            };
+        let connection_ctx = unwrap_or_return!(self.connections().get(server_address));
 
         // Reset the suspend time & disconnection time.
         connection_ctx.connected();
@@ -314,10 +345,7 @@ impl ConnectionManager {
 
     // Handles the disconnection event from an Electrum server.
     pub fn on_disconnected(&self, server_address: &str) {
-        let Some(connection_ctx) = self.connections().get(server_address) else {
-            warn!("No connection found for address: {server_address}");
-            return;
-        };
+        let connection_ctx = unwrap_or_return!(self.connections().get(server_address));
 
         if self
             .maintained_connections()
@@ -336,9 +364,8 @@ impl ConnectionManager {
 
         let abandoned_subs = connection_ctx.disconnected();
         // Re-subscribe the abandoned addresses using the client.
-        if let Some(client) = self.get_client() {
-            client.subscribe_addresses(abandoned_subs).ok();
-        };
+        let client = unwrap_or_return!(self.get_client());
+        client.subscribe_addresses(abandoned_subs).ok();
     }
 
     /// Remove a connection from the connection manager by its address.
@@ -367,7 +394,7 @@ impl ConnectionManager {
     /// A forever-lived task that pings active/maintained connections periodically.
     async fn ping_task(self) {
         loop {
-            let Some(client) = self.get_client() else { break };
+            let client = unwrap_or_break!(self.get_client());
             // This will ping all the active/maintained connections, which will keep these connections alive.
             client.server_ping().compat().await.ok();
             Timer::sleep(PING_INTERVAL).await;
@@ -381,7 +408,7 @@ impl ConnectionManager {
     ///     - etc...
     async fn background_task(self) {
         // Take out the min_connected notifiee from the manager.
-        let Some(mut min_connected_notification) = self.extract_below_min_connected_notifiee() else { return };
+        let mut min_connected_notification = unwrap_or_return!(self.extract_below_min_connected_notifiee());
         loop {
             // Get the candidate connections that we will consider maintaining.
             let (will_never_get_min_connected, candidate_connections) = {
@@ -429,7 +456,7 @@ impl ConnectionManager {
 
             // Establish the connections to the selected candidates and alter the maintained connections accordingly.
             {
-                let Some(client) = self.get_client() else { return };
+                let client = unwrap_or_return!(self.get_client());
                 // Map each connection to a future that tries to establish it.
                 let connection_loops = candidate_connections.into_iter().map(|connection| {
                     let client = client.clone();
