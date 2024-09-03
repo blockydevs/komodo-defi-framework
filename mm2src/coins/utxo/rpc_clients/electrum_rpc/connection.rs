@@ -128,6 +128,8 @@ pub struct ElectrumConnection {
     settings: ElectrumConnectionSettings,
     /// The Sender forwarding requests to writing part of underlying stream
     tx: AsyncMutex<Option<mpsc::Sender<Vec<u8>>>>,
+    /// A lock to prevent multiple connection establishments happening concurrently.
+    establishing_connection: AsyncMutex<()>,
     /// Responses are stored here
     responses: AsyncMutex<JsonRpcPendingRequests>,
     /// Selected protocol version. The value is initialized after the server.version RPC call.
@@ -143,6 +145,7 @@ impl ElectrumConnection {
         ElectrumConnection {
             settings,
             tx: AsyncMutex::new(None),
+            establishing_connection: AsyncMutex::new(()),
             responses: AsyncMutex::new(JsonRpcPendingRequests::new()),
             protocol_version: AsyncMutex::new(None),
             last_error: AsyncMutex::new(None),
@@ -158,7 +161,19 @@ impl ElectrumConnection {
 
     fn weak_spawner(&self) -> WeakSpawner { self.abortable_system.weak_spawner() }
 
-    pub async fn is_connected(&self) -> bool { self.tx.lock().await.is_some() }
+    /// Checks if the connection is connected or not.
+    ///
+    /// If the connection is being established in another thread, this will wait for the establishment to finish.
+    pub async fn is_connected(&self) -> bool {
+        // We need to wait for `establishing_connection` to prevent us from returning `true` while
+        // the connection isn't yet fully established (not queried for version, as this might fail).
+        // Such a problem might occur if the connection `tx` is set but the version querying is still in progress,
+        // in such a case, the connection isn't really usable for any other request (other than version querying).
+        let _establishing_connection = self.establishing_connection.lock().await;
+        self.is_connected_no_wait().await
+    }
+
+    async fn is_connected_no_wait(&self) -> bool { self.tx.lock().await.is_some() }
 
     async fn set_protocol_version(&self, version: f32) { self.protocol_version.lock().await.replace(version); }
 
@@ -179,18 +194,8 @@ impl ElectrumConnection {
     ///     2- Has errored but the error is recoverable.
     pub async fn usable(&self) -> bool { self.last_error().await.map(|le| le.is_recoverable()).unwrap_or(true) }
 
-    /// Try to connect to the electrum server.
-    ///
-    /// This method will try to connect to the electrum server. It is atomic, meaning that if it was called
-    /// multiple times by accident, only the first connection will hold (a `true` is then returned).
-    /// Other connections won't overwrite the first connection (and a `false` will then be return).
-    async fn try_connect(&self, tx: mpsc::Sender<Vec<u8>>) -> bool {
-        let mut tx_guard = self.tx.lock().await;
-        if tx_guard.is_some() {
-            // We are already connected to the server. Tell the caller that we won't accept connections until we disconnect.
-            return false;
-        }
-        tx_guard.replace(tx);
+    async fn connect(&self, tx: mpsc::Sender<Vec<u8>>) -> bool {
+        self.tx.lock().await.replace(tx);
         self.clear_last_error().await;
         true
     }
@@ -334,21 +339,11 @@ impl ElectrumConnection {
     ///
     /// This will first try to connect to the server and use that connection to query its version.
     /// If version checks succeed, the connection will be kept alive, otherwise, it will be dropped.
-    // FIXME: A FIX FOR ALL THE HEADACHES AND CONCURRENCY NIGHTMARES.
-    //        If there is somebody running establish_connection_loop for that connection, just stop them!
-    //        Mutex this function as a critical section.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn establish_connection_loop(
         connection: Arc<ElectrumConnection>,
         client: ElectrumClient,
     ) -> Result<(), ElectrumConnectionErr> {
-        // Check why we errored the last time, don't try to reconnect if it was an irrecoverable error.
-        if let Some(last_error) = connection.last_error().await {
-            if !last_error.is_recoverable() {
-                return Err(last_error);
-            }
-        }
-
         let address = connection.address().to_string();
         let event_handlers = client.event_handlers();
         // This is the timeout for connection establishment and version querying (i.e. the whole method).
@@ -357,6 +352,19 @@ impl ElectrumConnection {
             .settings
             .timeout_sec
             .unwrap_or(DEFAULT_CONNECTION_ESTABLISHMENT_TIMEOUT);
+
+        // Locking `establishing_connection` will prevent other threads from establishing a connection concurrently,
+        // and will also hold `is_connected` calls until we finish establishing the connection.
+        let now = Instant::now();
+        let _establishing_connection = connection.establishing_connection.lock().timeout_secs(timeout).await;
+        let timeout = (timeout - now.elapsed().as_secs_f64()).max(0.0);
+
+        // Check why we errored the last time, don't try to reconnect if it was an irrecoverable error.
+        if let Some(last_error) = connection.last_error().await {
+            if !last_error.is_recoverable() {
+                return Err(last_error);
+            }
+        }
 
         let socket_addr = match address.to_socket_addrs() {
             Ok(mut addr) => match addr.next() {
@@ -515,7 +523,7 @@ impl ElectrumConnection {
             let connection = connection.clone();
             let event_handlers = event_handlers.clone();
             async move {
-                let was_already_connected = !connection.try_connect(tx).await;
+                let was_already_connected = !connection.connect(tx).await;
                 // Signal that the connection is up and ready.
                 connection_ready_signal.send(was_already_connected).ok();
                 if was_already_connected {
@@ -616,13 +624,6 @@ impl ElectrumConnection {
             static ref CONN_IDX: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
         }
 
-        // Check why we errored the last time, don't try to reconnect if it was an irrecoverable error.
-        if let Some(last_error) = connection.last_error().await {
-            if !last_error.is_recoverable() {
-                return Err(last_error);
-            }
-        }
-
         let address = connection.address().to_string();
         let event_handlers = client.event_handlers();
         // This is the timeout for connection establishment and version querying (i.e. the whole method).
@@ -631,6 +632,19 @@ impl ElectrumConnection {
             .settings
             .timeout_sec
             .unwrap_or(DEFAULT_CONNECTION_ESTABLISHMENT_TIMEOUT);
+
+        // Locking `establishing_connection` will prevent other threads from establishing a connection concurrently,
+        // and will also hold `is_connected` calls until we finish establishing the connection.
+        let now = Instant::now();
+        let _establishing_connection = connection.establishing_connection.lock().timeout_secs(timeout).await;
+        let timeout = (timeout - now.elapsed().as_secs_f64()).max(0.0);
+
+        // Check why we errored the last time, don't try to reconnect if it was an irrecoverable error.
+        if let Some(last_error) = connection.last_error().await {
+            if !last_error.is_recoverable() {
+                return Err(last_error);
+            }
+        }
 
         let uri: Uri = match address.parse() {
             Ok(uri) => uri,
