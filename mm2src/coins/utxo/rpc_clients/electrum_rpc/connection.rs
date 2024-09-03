@@ -334,6 +334,9 @@ impl ElectrumConnection {
     ///
     /// This will first try to connect to the server and use that connection to query its version.
     /// If version checks succeed, the connection will be kept alive, otherwise, it will be dropped.
+    // FIXME: A FIX FOR ALL THE HEADACHES AND CONCURRENCY NIGHTMARES.
+    //        If there is somebody running establish_connection_loop for that connection, just stop them!
+    //        Mutex this function as a critical section.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn establish_connection_loop(
         connection: Arc<ElectrumConnection>,
@@ -566,8 +569,12 @@ impl ElectrumConnection {
         // This is the remaining timeout for version checking.
         let timeout = (timeout - now.elapsed().as_secs_f64()).max(0.0);
 
-        // FIXME: Looks like electrum will return "unsupported protocol version" if we give it some unsupported range.
-        // When then do we need to have version negotiation logic? Electrum won't ever give out of range protocol version, right?
+        // Don't query for the version if the client doesn't care about it, as querying for the version might
+        // fail with the protocol range we will provide.
+        if !client.negotiate_version() {
+            return Ok(());
+        }
+
         let version_query_error = match client
             .server_version(&address, client.protocol_version())
             .compat()
@@ -577,9 +584,7 @@ impl ElectrumConnection {
             Ok(response) => match response {
                 Ok(version_str) => match version_str.protocol_version.parse::<f32>() {
                     Ok(version_f32) => {
-                        // If no version negotiation is needed or the server's version is in the accepted version range,
-                        // set the protocol version and return successfully.
-                        if !client.negotiate_version() || client.protocol_version().contains(&version_f32) {
+                        if client.protocol_version().contains(&version_f32) {
                             connection.set_protocol_version(version_f32).await;
                             return Ok(());
                         }
@@ -809,6 +814,12 @@ impl ElectrumConnection {
         // This is the remaining timeout for version checking.
         let timeout = (timeout - now.elapsed().as_secs_f64()).max(0.0);
 
+        // Don't query for the version if the client doesn't care about it, as querying for the version might
+        // fail with the protocol range we will provide.
+        if !client.negotiate_version() {
+            return Ok(());
+        }
+
         let version_query_error = match client
             .server_version(&address, client.protocol_version())
             .compat()
@@ -818,9 +829,7 @@ impl ElectrumConnection {
             Ok(response) => match response {
                 Ok(version_str) => match version_str.protocol_version.parse::<f32>() {
                     Ok(version_f32) => {
-                        // If no version negotiation is needed or the server's version is in the accepted version range,
-                        // set the protocol version and return successfully.
-                        if !client.negotiate_version() || client.protocol_version().contains(&version_f32) {
+                        if client.protocol_version().contains(&version_f32) {
                             connection.set_protocol_version(version_f32).await;
                             return Ok(());
                         }
