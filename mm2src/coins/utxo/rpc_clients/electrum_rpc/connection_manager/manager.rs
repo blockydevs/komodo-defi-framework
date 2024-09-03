@@ -272,10 +272,14 @@ impl ConnectionManager {
         let start_time = Instant::now();
         loop {
             if !self.get_active_connections().await.is_empty() {
+                println!("Connected to the server");
+                common::log::error!("connected to the server");
                 return Ok(());
             }
             Timer::sleep(0.5).await;
             if start_time.elapsed().as_secs_f32() > timeout {
+                println!("timed out not connected");
+                common::log::error!("timed out not connected");
                 return Err(format!(
                     "Waited for {} seconds but the connection manager is still not connected",
                     timeout
@@ -335,7 +339,7 @@ impl ConnectionManager {
 
     // Handles the connection event.
     pub fn on_connected(&self, server_address: &str) {
-        common::log::error!("Connecting connection: {}", server_address);
+        println!("Connecting connection: {}", server_address);
         let connection_ctx = unwrap_or_return!(self.connections().get(server_address));
 
         // Reset the suspend time & disconnection time.
@@ -344,7 +348,7 @@ impl ConnectionManager {
 
     // Handles the disconnection event from an Electrum server.
     pub fn on_disconnected(&self, server_address: &str) {
-        common::log::error!("Disconnecting connection: {}", server_address);
+        println!("Disconnecting connection: {}", server_address);
         let connection_ctx = unwrap_or_return!(self.connections().get(server_address));
 
         if self
@@ -374,7 +378,7 @@ impl ConnectionManager {
         &self,
         server_address: &str,
     ) -> Result<Arc<ElectrumConnection>, ConnectionManagerErr> {
-        common::log::error!("Removing connection: {}", server_address);
+        println!("Removing connection: {}", server_address);
         let connection = self
             .get_connection(server_address)
             .ok_or(ConnectionManagerErr::UnknownAddress)?;
@@ -479,7 +483,7 @@ impl ConnectionManager {
                             || conn_ctx.id < lowest_priority_connection_id
                         {
                             let mut maintained_connections = self.maintained_connections().write().unwrap();
-                            common::log::error!("Maintaining connection: {}", address);
+                            println!("Maintaining connection: {}", address);
                             maintained_connections.insert(conn_ctx.id, address);
                             // If we have reached the `max_connected` threshold then remove the lowest priority connection.
                             if !maintained_connections_size < self.config().max_connected {
