@@ -50,12 +50,10 @@ macro_rules! disconnect_and_return {
         disconnect_and_return!(err, $conn, $handlers);
     }};
     ($err:expr, $conn:expr, $handlers:expr) => {{
+        // Inform the event handlers of the disconnection.
+        $handlers.on_disconnected(&$conn.address()).ok();
         // Disconnect the connection.
         $conn.disconnect(Some($err.clone())).await;
-        // Inform the event handlers of the disconnection.
-        // Note that it's important to inform the handler after disconnecting and not before.
-        // This way we are sure that the last signal sent to the handler is the disconnection signal.
-        $handlers.on_disconnected(&$conn.address()).ok();
         error!("{} {:?}", $conn.address(), $err);
         return Err($err);
     }};
@@ -69,6 +67,25 @@ macro_rules! disconnect_and_return_if_err {
                 disconnect_and_return!($typ, e, $conn, $handlers);
             },
         }
+    }};
+}
+
+macro_rules! wrap_timeout {
+    ($call:expr, $timeout:expr, $conn:expr, $handlers:expr) => {{
+        let now = Instant::now();
+        let res = match $call.timeout_secs($timeout).await {
+            Ok(res) => res,
+            Err(_) => {
+                disconnect_and_return!(
+                    ElectrumConnectionErr::Timeout(stringify!($call), $timeout),
+                    $conn,
+                    $handlers
+                );
+            },
+        };
+        // Remaining timeout after executing `$call`.
+        let timeout = ($timeout - now.elapsed().as_secs_f64()).max(0.0);
+        (timeout, res)
     }};
 }
 
@@ -100,11 +117,18 @@ pub struct ElectrumConnectionSettings {
     pub timeout_sec: Option<f64>,
 }
 
+/// Possible connection errors when connection to an Electrum server.
 #[derive(Clone, Debug)]
 pub enum ElectrumConnectionErr {
-    Timeout(f64),
+    /// Couldn't connect to the server within the provided timeout.
+    /// The first argument is the call (stringified) that timed out.
+    /// The second argument is the time limit it had to finish within, in seconds.
+    Timeout(&'static str, f64),
+    /// A temporary error that might be resolved later on.
     Temporary(String),
+    /// An error that can't be resolved by retrying.
     Irrecoverable(String),
+    /// The server's version doesn't match the client's version.
     VersionMismatch(OrdRange<f32>, f32),
 }
 
@@ -112,7 +136,7 @@ impl ElectrumConnectionErr {
     pub fn is_recoverable(&self) -> bool {
         match self {
             ElectrumConnectionErr::Irrecoverable(_) => false,
-            ElectrumConnectionErr::Timeout(_)
+            ElectrumConnectionErr::Timeout(_, _)
             | ElectrumConnectionErr::Temporary(_)
             // We won't consider version mismatch as irrecoverable since assuming that
             // a server's version can change over time.
@@ -173,6 +197,9 @@ impl ElectrumConnection {
         self.is_connected_no_wait().await
     }
 
+    /// Checks if the connection is connected or not, but doesn't wait for concurrent connection establishment.
+    ///
+    /// This is particularly useful if we know we are the holders of `establishing_connection` lock, to avoid deadlocking.
     async fn is_connected_no_wait(&self) -> bool { self.tx.lock().await.is_some() }
 
     async fn set_protocol_version(&self, version: f32) { self.protocol_version.lock().await.replace(version); }
@@ -194,10 +221,9 @@ impl ElectrumConnection {
     ///     2- Has errored but the error is recoverable.
     pub async fn usable(&self) -> bool { self.last_error().await.map(|le| le.is_recoverable()).unwrap_or(true) }
 
-    async fn connect(&self, tx: mpsc::Sender<Vec<u8>>) -> bool {
+    async fn connect(&self, tx: mpsc::Sender<Vec<u8>>) {
         self.tx.lock().await.replace(tx);
         self.clear_last_error().await;
-        true
     }
 
     /// Disconnect and clear the connection state.
@@ -355,9 +381,17 @@ impl ElectrumConnection {
 
         // Locking `establishing_connection` will prevent other threads from establishing a connection concurrently,
         // and will also hold `is_connected` calls until we finish establishing the connection.
-        let now = Instant::now();
-        let _establishing_connection = connection.establishing_connection.lock().timeout_secs(timeout).await;
-        let timeout = (timeout - now.elapsed().as_secs_f64()).max(0.0);
+        let (timeout, _establishing_connection) = wrap_timeout!(
+            connection.establishing_connection.lock(),
+            timeout,
+            connection,
+            event_handlers
+        );
+
+        // Check if we are already connected.
+        if connection.is_connected_no_wait().await {
+            return Ok(());
+        }
 
         // Check why we errored the last time, don't try to reconnect if it was an irrecoverable error.
         if let Some(last_error) = connection.last_error().await {
@@ -430,16 +464,7 @@ impl ElectrumConnection {
         };
 
         // Try to connect to the server.
-        let now = Instant::now();
-        let Ok(connect_f) = connect_f.boxed().timeout_secs(timeout).await else {
-            disconnect_and_return!(
-                ElectrumConnectionErr::Timeout(timeout),
-                connection,
-                event_handlers
-            );
-        };
-        // We will use the remaining timeout for version checking.
-        let timeout = (timeout - now.elapsed().as_secs_f64()).max(0.0);
+        let (timeout, connect_f) = wrap_timeout!(connect_f.boxed(), timeout, connection, event_handlers);
 
         let stream = disconnect_and_return_if_err!(connect_f, Temporary, connection, event_handlers);
         disconnect_and_return_if_err!(stream.as_ref().set_nodelay(true), Temporary, connection, event_handlers);
@@ -523,15 +548,9 @@ impl ElectrumConnection {
             let connection = connection.clone();
             let event_handlers = event_handlers.clone();
             async move {
-                let was_already_connected = !connection.connect(tx).await;
-                // Signal that the connection is up and ready.
-                connection_ready_signal.send(was_already_connected).ok();
-                if was_already_connected {
-                    // Gracefully return if some other thread is already connected using `connection`.
-                    // Up until this point, we didn't alter `connection` in any way.
-                    return;
-                }
-
+                connection.connect(tx).await;
+                // Signal that the connection is up and ready so to start the version querying.
+                connection_ready_signal.send(()).ok();
                 event_handlers.on_connected(&address).ok();
                 info!("{address} is now connected");
 
@@ -550,32 +569,16 @@ impl ElectrumConnection {
         connection.weak_spawner().spawn(connection_loop);
 
         // Wait for the connection to be ready before querying the version.
-        let now = Instant::now();
-        match wait_for_connection_ready.timeout_secs(timeout).await {
-            // The connection is already connected. Don't query for the version because Electrum doesn't
-            // like when a client queries for the version multiple times.
-            Ok(Ok(true)) => return Ok(()),
-            // We just connected, need to query for the server version, continue.
-            Ok(Ok(false)) => {},
-            Ok(Err(_)) => {
-                disconnect_and_return!(
-                    Temporary,
-                    format!("Connection ready signal was dropped, weak spawner failed to spawn the connection loop"),
-                    connection,
-                    event_handlers
-                );
-            },
-            Err(_) => {
-                disconnect_and_return!(
-                    Temporary,
-                    format!("Timed out ({timeout}s) while waiting for the connection to be ready"),
-                    connection,
-                    event_handlers
-                );
-            },
+        let (timeout, wait_for_connection_ready) =
+            wrap_timeout!(wait_for_connection_ready, timeout, connection, event_handlers);
+        if wait_for_connection_ready.is_err() {
+            disconnect_and_return!(
+                Temporary,
+                format!("Connection ready signal was dropped, weak spawner is/was terminated."),
+                connection,
+                event_handlers
+            );
         }
-        // This is the remaining timeout for version checking.
-        let timeout = (timeout - now.elapsed().as_secs_f64()).max(0.0);
 
         // Don't query for the version if the client doesn't care about it, as querying for the version might
         // fail with the protocol range we will provide.
@@ -583,30 +586,25 @@ impl ElectrumConnection {
             return Ok(());
         }
 
-        let version_query_error = match client
-            .server_version(&address, client.protocol_version())
-            .compat()
-            .timeout_secs(timeout)
-            .await
-        {
-            Ok(response) => match response {
-                Ok(version_str) => match version_str.protocol_version.parse::<f32>() {
-                    Ok(version_f32) => {
-                        if client.protocol_version().contains(&version_f32) {
-                            connection.set_protocol_version(version_f32).await;
-                            return Ok(());
-                        }
-                        ElectrumConnectionErr::VersionMismatch(client.protocol_version().clone(), version_f32)
-                    },
-                    Err(e) => {
-                        ElectrumConnectionErr::Temporary(format!("Failed to parse electrum server version {e:?}"))
-                    },
+        let (_, version_query) = wrap_timeout!(
+            client.server_version(&address, client.protocol_version()).compat(),
+            timeout,
+            connection,
+            event_handlers
+        );
+
+        let version_query_error = match version_query {
+            Ok(version_str) => match version_str.protocol_version.parse::<f32>() {
+                Ok(version_f32) => {
+                    if client.protocol_version().contains(&version_f32) {
+                        connection.set_protocol_version(version_f32).await;
+                        return Ok(());
+                    }
+                    ElectrumConnectionErr::VersionMismatch(client.protocol_version().clone(), version_f32)
                 },
-                Err(e) => ElectrumConnectionErr::Temporary(format!("Error querying electrum server version {e:?}")),
+                Err(e) => ElectrumConnectionErr::Temporary(format!("Failed to parse electrum server version {e:?}")),
             },
-            Err(_) => ElectrumConnectionErr::Temporary(format!(
-                "Timed out ({timeout}s) while querying electrum server version"
-            )),
+            Err(e) => ElectrumConnectionErr::Temporary(format!("Error querying electrum server version {e:?}")),
         };
 
         disconnect_and_return!(version_query_error, connection, event_handlers);
@@ -635,10 +633,17 @@ impl ElectrumConnection {
 
         // Locking `establishing_connection` will prevent other threads from establishing a connection concurrently,
         // and will also hold `is_connected` calls until we finish establishing the connection.
-        let now = Instant::now();
-        let _establishing_connection = connection.establishing_connection.lock().timeout_secs(timeout).await;
-        let timeout = (timeout - now.elapsed().as_secs_f64()).max(0.0);
+        let (timeout, _establishing_connection) = wrap_timeout!(
+            connection.establishing_connection.lock(),
+            timeout,
+            connection,
+            event_handlers
+        );
 
+        // Check if we are already connected.
+        if connection.is_connected_no_wait().await {
+            return Ok(());
+        }
         // Check why we errored the last time, don't try to reconnect if it was an irrecoverable error.
         if let Some(last_error) = connection.last_error().await {
             if !last_error.is_recoverable() {
@@ -686,23 +691,17 @@ impl ElectrumConnection {
         };
 
         // Try to connect to the server.
-        let now = Instant::now();
-        let Ok(connect_f) = ws_transport(
-            CONN_IDX.fetch_add(1, AtomicOrdering::Relaxed),
-            &protocol_prefixed_address,
-            &connection.weak_spawner()
-        )
-        .boxed()
-        .timeout_secs(timeout)
-        .await else {
-            disconnect_and_return!(
-                ElectrumConnectionErr::Timeout(timeout),
-                connection,
-                event_handlers
-            );
-        };
-        // We will use the remaining timeout for version checking.
-        let timeout = (timeout - now.elapsed().as_secs_f64()).max(0.0);
+        let (timeout, connect_f) = wrap_timeout!(
+            ws_transport(
+                CONN_IDX.fetch_add(1, AtomicOrdering::Relaxed),
+                &protocol_prefixed_address,
+                &connection.weak_spawner(),
+            )
+            .boxed(),
+            timeout,
+            connection,
+            event_handlers
+        );
 
         let (mut transport_tx, mut transport_rx) =
             disconnect_and_return_if_err!(connect_f, Temporary, connection, event_handlers);
@@ -775,14 +774,9 @@ impl ElectrumConnection {
             let connection = connection.clone();
             let event_handlers = event_handlers.clone();
             async move {
-                let was_already_connected = !connection.try_connect(tx).await;
-                // Signal that the connection is up and ready.
-                connection_ready_signal.send(was_already_connected).ok();
-                if was_already_connected {
-                    // Gracefully return if some other thread is already connected using `connection`.
-                    // Up until this point, we didn't alter `connection` in any way.
-                    return;
-                }
+                connection.connect(tx).await;
+                // Signal that the connection is up and ready, so to start the version querying.
+                connection_ready_signal.send(()).ok();
                 event_handlers.on_connected(&address).ok();
                 info!("{address} is now connected");
 
@@ -798,35 +792,17 @@ impl ElectrumConnection {
             }
         };
         // Start the connection loop on a weak spawner.
-        connection.weak_spawner().spawn(connection_loop);
-
-        // Wait for the connection to be ready before querying the version.
-        let now = Instant::now();
-        match wait_for_connection_ready.timeout_secs(timeout).await {
-            // The connection is already connected. Don't query for the version because Electrum doesn't
-            // like when a client queries for the version multiple times.
-            Ok(Ok(true)) => return Ok(()),
-            // We just connected, need to query for the server version, continue.
-            Ok(Ok(false)) => {},
-            Ok(Err(_)) => {
-                disconnect_and_return!(
-                    Temporary,
-                    format!("Connection ready signal was dropped, weak spawner failed to spawn the connection loop"),
-                    connection,
-                    event_handlers
-                );
-            },
-            Err(_) => {
-                disconnect_and_return!(
-                    Temporary,
-                    format!("Timed out ({timeout}s) while waiting for the connection to be ready"),
-                    connection,
-                    event_handlers
-                );
-            },
+        connection.weak_spawner().spawn(connection_loop); // Wait for the connection to be ready before querying the version.
+        let (timeout, wait_for_connection_ready) =
+            wrap_timeout!(wait_for_connection_ready, timeout, connection, event_handlers);
+        if wait_for_connection_ready.is_err() {
+            disconnect_and_return!(
+                Temporary,
+                format!("Connection ready signal was dropped, weak spawner is/was terminated."),
+                connection,
+                event_handlers
+            );
         }
-        // This is the remaining timeout for version checking.
-        let timeout = (timeout - now.elapsed().as_secs_f64()).max(0.0);
 
         // Don't query for the version if the client doesn't care about it, as querying for the version might
         // fail with the protocol range we will provide.
@@ -834,30 +810,25 @@ impl ElectrumConnection {
             return Ok(());
         }
 
-        let version_query_error = match client
-            .server_version(&address, client.protocol_version())
-            .compat()
-            .timeout_secs(timeout)
-            .await
-        {
-            Ok(response) => match response {
-                Ok(version_str) => match version_str.protocol_version.parse::<f32>() {
-                    Ok(version_f32) => {
-                        if client.protocol_version().contains(&version_f32) {
-                            connection.set_protocol_version(version_f32).await;
-                            return Ok(());
-                        }
-                        ElectrumConnectionErr::VersionMismatch(client.protocol_version().clone(), version_f32)
-                    },
-                    Err(e) => {
-                        ElectrumConnectionErr::Temporary(format!("Failed to parse electrum server version {e:?}"))
-                    },
+        let (_, version_query) = wrap_timeout!(
+            client.server_version(&address, client.protocol_version()).compat(),
+            timeout,
+            connection,
+            event_handlers
+        );
+
+        let version_query_error = match version_query {
+            Ok(version_str) => match version_str.protocol_version.parse::<f32>() {
+                Ok(version_f32) => {
+                    if client.protocol_version().contains(&version_f32) {
+                        connection.set_protocol_version(version_f32).await;
+                        return Ok(());
+                    }
+                    ElectrumConnectionErr::VersionMismatch(client.protocol_version().clone(), version_f32)
                 },
-                Err(e) => ElectrumConnectionErr::Temporary(format!("Error querying electrum server version {e:?}")),
+                Err(e) => ElectrumConnectionErr::Temporary(format!("Failed to parse electrum server version {e:?}")),
             },
-            Err(_) => ElectrumConnectionErr::Temporary(format!(
-                "Timed out ({timeout}s) while querying electrum server version"
-            )),
+            Err(e) => ElectrumConnectionErr::Temporary(format!("Error querying electrum server version {e:?}")),
         };
 
         disconnect_and_return!(version_query_error, connection, event_handlers);

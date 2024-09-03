@@ -366,7 +366,7 @@ impl ElectrumClient {
             // In tests, we don't want to loop endlessly.
             match send_request().await {
                 Ok((address, response)) => Ok((address, response)),
-                Err(errors) => Err(JsonRpcErrorType::Internal(format!("All server errored: {errors:?}"))),
+                Err(errors) => Err(JsonRpcErrorType::Internal(format!("All servers errored: {errors:?}"))),
             }
         }
     }
