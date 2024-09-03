@@ -50,6 +50,7 @@ macro_rules! disconnect_and_return {
         disconnect_and_return!(err, $conn, $handlers);
     }};
     ($err:expr, $conn:expr, $handlers:expr) => {{
+        common::log::error!("De-establishing connection: {} because {:?}", $conn.address(), $err);
         // Inform the event handlers of the disconnection.
         $handlers.on_disconnected(&$conn.address()).ok();
         // Disconnect the connection.

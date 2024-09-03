@@ -335,6 +335,7 @@ impl ConnectionManager {
 
     // Handles the connection event.
     pub fn on_connected(&self, server_address: &str) {
+        common::log::error!("Connecting connection: {}", server_address);
         let connection_ctx = unwrap_or_return!(self.connections().get(server_address));
 
         // Reset the suspend time & disconnection time.
@@ -343,6 +344,7 @@ impl ConnectionManager {
 
     // Handles the disconnection event from an Electrum server.
     pub fn on_disconnected(&self, server_address: &str) {
+        common::log::error!("Disconnecting connection: {}", server_address);
         let connection_ctx = unwrap_or_return!(self.connections().get(server_address));
 
         if self
@@ -372,6 +374,7 @@ impl ConnectionManager {
         &self,
         server_address: &str,
     ) -> Result<Arc<ElectrumConnection>, ConnectionManagerErr> {
+        common::log::error!("Removing connection: {}", server_address);
         let connection = self
             .get_connection(server_address)
             .ok_or(ConnectionManagerErr::UnknownAddress)?;
@@ -476,6 +479,7 @@ impl ConnectionManager {
                             || conn_ctx.id < lowest_priority_connection_id
                         {
                             let mut maintained_connections = self.maintained_connections().write().unwrap();
+                            common::log::error!("Maintaining connection: {}", address);
                             maintained_connections.insert(conn_ctx.id, address);
                             // If we have reached the `max_connected` threshold then remove the lowest priority connection.
                             if !maintained_connections_size < self.config().max_connected {
