@@ -65,6 +65,7 @@ pub mod spl;
 #[cfg(test)] mod solana_common_tests;
 #[cfg(test)] mod solana_tests;
 #[cfg(test)] mod spl_tests;
+mod solana_hd_wallet;
 
 pub const SOLANA_DEFAULT_DECIMALS: u64 = 9;
 pub const LAMPORTS_DUMMY_AMOUNT: u64 = 10;
