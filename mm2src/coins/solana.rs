@@ -13,8 +13,9 @@ use common::{async_blocking,
              executor::{abortable_queue::AbortableQueue, AbortableSystem, AbortedError},
              log::error,
              now_sec};
-use crypto::HDPathToCoin;
+use crypto::{Ed25519ExtendedPublicKey, HDPathToCoin, Secp256k1ExtendedPublicKey};
 use derive_more::Display;
+use ethereum_types::Public;
 use futures::{compat::Future01CompatExt,
               {FutureExt, TryFutureExt}};
 use futures01::Future;
@@ -39,7 +40,7 @@ use solana_sdk::{commitment_config::{CommitmentConfig, CommitmentLevel},
 use spl_token::solana_program;
 
 use super::{CoinBalance, HistorySyncState, MarketCoinOps, MmCoin, SwapOps, TradeFee, Transaction, TransactionEnum,
-            TransactionErr, WatcherOps};
+            TransactionErr, WatcherOps, PrivKeyPolicyOps};
 use crate::coin_errors::{MyAddressError, ValidatePaymentResult};
 use crate::hd_wallet::HDPathAccountToAddressId;
 use crate::solana::{solana_common::{lamports_to_sol, PrepareTransferData, SufficientBalanceError},
@@ -57,6 +58,7 @@ use crate::{BalanceError, BalanceFut, CheckIfMyPaymentSentArgs, CoinFutSpawner, 
             ValidateWatcherSpendInput, VerificationResult, WaitForHTLCTxSpendArgs, WatcherReward, WatcherRewardError,
             WatcherSearchForSwapTxSpendInput, WatcherValidatePaymentInput, WatcherValidateTakerFeeInput,
             WithdrawError, WithdrawFut, WithdrawRequest, WithdrawResult};
+use crate::solana::solana_hd_wallet::SolanaPublicKey;
 
 pub mod solana_common;
 mod solana_decode_tx_helpers;
@@ -1096,4 +1098,8 @@ impl MmCoin for SolanaCoin {
     fn on_disabled(&self) -> Result<(), AbortedError> { AbortableSystem::abort_all(&self.abortable_system) }
 
     fn on_token_deactivated(&self, _ticker: &str) { unimplemented!() }
+}
+
+pub fn pubkey_from_extended(extended_pubkey: &Ed25519ExtendedPublicKey) -> SolanaPublicKey {
+    extended_pubkey.pubkey
 }

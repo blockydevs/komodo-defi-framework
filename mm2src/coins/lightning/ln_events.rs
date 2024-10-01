@@ -19,6 +19,7 @@ use secp256k1v24::Secp256k1;
 use std::convert::{TryFrom, TryInto};
 use std::sync::Arc;
 use utxo_signer::with_key_pair::sign_tx;
+use crate::PrivKeyPolicyOps;
 
 const TRY_LOOP_INTERVAL: f64 = 60.;
 /// 1 second.

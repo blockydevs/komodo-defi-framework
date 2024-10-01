@@ -10,6 +10,9 @@ doctest = false
 async-trait = "0.1"
 bip32 = { version = "0.2.2", default-features = false, features = ["alloc", "secp256k1-ffi"] }
 common = { path = "../common" }
+ed25519-dalek = { version = "1.0.1", features = ["serde"] }
+ed25519-dalek-bip32 = { version = "0.2.0", default-features = false }
+hex = "0.4.2"
 mm2_err_handle = { path = "../mm2_err_handle" }
 derive_more = "0.99"
 futures = { version = "0.3", package = "futures", features = ["compat", "async-await"] }

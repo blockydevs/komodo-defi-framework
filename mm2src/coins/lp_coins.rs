@@ -87,6 +87,8 @@ use std::time::Duration;
 use std::{fmt, iter};
 use utxo_signer::with_key_pair::UtxoSignWithKeyPairError;
 use zcash_primitives::transaction::Transaction as ZTransaction;
+use crate::hd_wallet::pubkey::ExtendedPublicKeyOps;
+
 cfg_native! {
     use crate::lightning::LightningCoin;
     use crate::lightning::ln_conf::PlatformCoinConfirmationTargets;
@@ -4104,27 +4106,28 @@ where
     XPubExtractor: HDXPubExtractor + Send,
     Coin: HDWalletCoinOps + CoinWithPrivKeyPolicy,
 {
-    match xpub_extractor {
-        Some(xpub_extractor) => {
-            let trezor_coin = coin.trezor_coin()?;
-            let xpub = xpub_extractor.extract_xpub(trezor_coin, derivation_path).await?;
-            Secp256k1ExtendedPublicKey::from_str(&xpub).map_to_mm(|e| HDExtractPubkeyError::InvalidXpub(e.to_string()))
-        },
-        None => {
-            let mut priv_key = coin
-                .priv_key_policy()
-                .bip39_secp_priv_key_or_err()
-                .mm_err(|e| HDExtractPubkeyError::Internal(e.to_string()))?
-                .clone();
-            for child in derivation_path {
-                priv_key = priv_key
-                    .derive_child(child)
-                    .map_to_mm(|e| HDExtractPubkeyError::Internal(e.to_string()))?;
-            }
-            drop_mutability!(priv_key);
-            Ok(priv_key.public_key())
-        },
-    }
+    // match xpub_extractor {
+    //     Some(xpub_extractor) => {
+    //         let trezor_coin = coin.trezor_coin()?;
+    //         let xpub = xpub_extractor.extract_xpub(trezor_coin, derivation_path).await?;
+    //         Secp256k1ExtendedPublicKey::from_str(&xpub).map_to_mm(|e| HDExtractPubkeyError::InvalidXpub(e.to_string()))
+    //     },
+    //     None => {
+    //         let mut priv_key = coin
+    //             .priv_key_policy()
+    //             .bip39_secp_priv_key_or_err()
+    //             .mm_err(|e| HDExtractPubkeyError::Internal(e.to_string()))?
+    //             .clone();
+    //         for child in derivation_path {
+    //             priv_key = priv_key
+    //                 .derive_child(child)
+    //                 .map_to_mm(|e| HDExtractPubkeyError::Internal(e.to_string()))?;
+    //         }
+    //         drop_mutability!(priv_key);
+    //         Ok(priv_key.public_key())
+    //     },
+    // }
+    todo!()
 }
 
 #[derive(Clone)]

@@ -16,20 +16,7 @@ use crate::utxo::{qtum, ActualTxFee, AdditionalTxData, AddrFromStrError, Broadca
                   UnsupportedAddr, UtxoActivationParams, UtxoAddressFormat, UtxoCoinFields, UtxoCommonOps,
                   UtxoFromLegacyReqErr, UtxoTx, UtxoTxBroadcastOps, UtxoTxGenerationOps, VerboseTransactionFrom,
                   UTXO_LOCK};
-use crate::{BalanceError, BalanceFut, CheckIfMyPaymentSentArgs, CoinBalance, CoinFutSpawner, ConfirmPaymentInput,
-            DexFee, Eip1559Ops, FeeApproxStage, FoundSwapTxSpend, HistorySyncState, IguanaPrivKey, MakerSwapTakerCoin,
-            MarketCoinOps, MmCoin, MmCoinEnum, NegotiateSwapContractAddrErr, PaymentInstructionArgs,
-            PaymentInstructions, PaymentInstructionsErr, PrivKeyBuildPolicy, PrivKeyPolicyNotAllowed,
-            RawTransactionFut, RawTransactionRequest, RawTransactionResult, RefundError, RefundPaymentArgs,
-            RefundResult, SearchForSwapTxSpendInput, SendMakerPaymentSpendPreimageInput, SendPaymentArgs,
-            SignRawTransactionRequest, SignatureResult, SpendPaymentArgs, SwapOps, SwapTxFeePolicy,
-            TakerSwapMakerCoin, TradeFee, TradePreimageError, TradePreimageFut, TradePreimageResult,
-            TradePreimageValue, TransactionData, TransactionDetails, TransactionEnum, TransactionErr, TransactionFut,
-            TransactionResult, TransactionType, TxMarshalingErr, UnexpectedDerivationMethod, ValidateAddressResult,
-            ValidateFeeArgs, ValidateInstructionsErr, ValidateOtherPubKeyErr, ValidatePaymentFut,
-            ValidatePaymentInput, ValidateWatcherSpendInput, VerificationResult, WaitForHTLCTxSpendArgs, WatcherOps,
-            WatcherReward, WatcherRewardError, WatcherSearchForSwapTxSpendInput, WatcherValidatePaymentInput,
-            WatcherValidateTakerFeeInput, WithdrawError, WithdrawFee, WithdrawFut, WithdrawRequest, WithdrawResult};
+use crate::{BalanceError, BalanceFut, CheckIfMyPaymentSentArgs, CoinBalance, CoinFutSpawner, ConfirmPaymentInput, DexFee, Eip1559Ops, FeeApproxStage, FoundSwapTxSpend, HistorySyncState, IguanaPrivKey, MakerSwapTakerCoin, MarketCoinOps, MmCoin, MmCoinEnum, NegotiateSwapContractAddrErr, PaymentInstructionArgs, PaymentInstructions, PaymentInstructionsErr, PrivKeyBuildPolicy, PrivKeyPolicyNotAllowed, PrivKeyPolicyOps, RawTransactionFut, RawTransactionRequest, RawTransactionResult, RefundError, RefundPaymentArgs, RefundResult, SearchForSwapTxSpendInput, SendMakerPaymentSpendPreimageInput, SendPaymentArgs, SignRawTransactionRequest, SignatureResult, SpendPaymentArgs, SwapOps, SwapTxFeePolicy, TakerSwapMakerCoin, TradeFee, TradePreimageError, TradePreimageFut, TradePreimageResult, TradePreimageValue, TransactionData, TransactionDetails, TransactionEnum, TransactionErr, TransactionFut, TransactionResult, TransactionType, TxMarshalingErr, UnexpectedDerivationMethod, ValidateAddressResult, ValidateFeeArgs, ValidateInstructionsErr, ValidateOtherPubKeyErr, ValidatePaymentFut, ValidatePaymentInput, ValidateWatcherSpendInput, VerificationResult, WaitForHTLCTxSpendArgs, WatcherOps, WatcherReward, WatcherRewardError, WatcherSearchForSwapTxSpendInput, WatcherValidatePaymentInput, WatcherValidateTakerFeeInput, WithdrawError, WithdrawFee, WithdrawFut, WithdrawRequest, WithdrawResult};
 use async_trait::async_trait;
 use bitcrypto::{dhash160, sha256};
 use chain::TransactionOutput;

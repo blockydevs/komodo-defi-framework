@@ -23,7 +23,7 @@ use crate::utxo::utxo_hd_wallet::{UtxoHDAccount, UtxoHDAddress};
 use crate::utxo::utxo_tx_history_v2::{UtxoMyAddressesHistoryError, UtxoTxDetailsError, UtxoTxDetailsParams,
                                       UtxoTxHistoryOps};
 use crate::{CanRefundHtlc, CheckIfMyPaymentSentArgs, CoinBalance, CoinWithDerivationMethod, CoinWithPrivKeyPolicy,
-            ConfirmPaymentInput, DexFee, FundingTxSpend, GenPreimageResult, GenTakerFundingSpendArgs,
+            PrivKeyPolicyOps, ConfirmPaymentInput, DexFee, FundingTxSpend, GenPreimageResult, GenTakerFundingSpendArgs,
             GenTakerPaymentSpendArgs, GetWithdrawSenderAddress, IguanaBalanceOps, IguanaPrivKey, MakerCoinSwapOpsV2,
             MakerSwapTakerCoin, MmCoinEnum, NegotiateSwapContractAddrErr, PaymentInstructionArgs, PaymentInstructions,
             PaymentInstructionsErr, PrivKeyBuildPolicy, RawTransactionRequest, RawTransactionResult, RefundError,
@@ -1056,6 +1056,7 @@ impl UtxoSignerOps for UtxoStandardCoin {
 
 impl CoinWithPrivKeyPolicy for UtxoStandardCoin {
     type KeyPair = KeyPair;
+    type PrivKeyPolicy = PrivKeyPolicy<Self::KeyPair>;
 
     fn priv_key_policy(&self) -> &PrivKeyPolicy<Self::KeyPair> { &self.utxo_arc.priv_key_policy }
 }
