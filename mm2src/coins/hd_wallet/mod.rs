@@ -32,7 +32,7 @@ pub use errors::{AccountUpdatingError, AddressDerivingError, HDExtractPubkeyErro
                  InvalidBip44ChainError, NewAccountCreationError, NewAddressDeriveConfirmError,
                  NewAddressDerivingError, TrezorCoinError};
 
-mod pubkey;
+pub(crate) mod pubkey;
 pub use pubkey::{ExtendedPublicKeyOps, ExtractExtendedPubkey, HDXPubExtractor, RpcTaskXPubExtractor};
 
 mod storage;

@@ -7,8 +7,7 @@ use crate::utxo::rpc_clients::UtxoRpcClientEnum;
 use crate::utxo::utxo_common::{big_decimal_from_sat_unsigned, UtxoTxBuilder};
 use crate::utxo::{qtum, utxo_common, Address, GetUtxoListOps, UtxoCommonOps};
 use crate::utxo::{PrivKeyPolicyNotAllowed, UTXO_LOCK};
-use crate::{DelegationError, DelegationFut, DelegationResult, MarketCoinOps, StakingInfos, StakingInfosError,
-            StakingInfosFut, StakingInfosResult, TransactionData, TransactionDetails, TransactionType};
+use crate::{DelegationError, DelegationFut, DelegationResult, MarketCoinOps, PrivKeyPolicyOps, StakingInfos, StakingInfosError, StakingInfosFut, StakingInfosResult, TransactionData, TransactionDetails, TransactionType};
 use bitcrypto::dhash256;
 use common::now_sec;
 use derive_more::Display;

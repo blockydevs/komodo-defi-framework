@@ -23,6 +23,7 @@ use std::collections::hash_map::Entry;
 use std::fs::File;
 use std::path::PathBuf;
 use std::sync::Arc;
+use crate::PrivKeyPolicyOps;
 
 pub const PAYMENT_RETRY_ATTEMPTS: usize = 5;
 

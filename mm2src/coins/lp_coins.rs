@@ -53,6 +53,7 @@ use crypto::{derive_secp256k1_secret, Bip32Error, Bip44Chain, CryptoCtx, CryptoC
              GlobalHDAccountArc, HDPathToCoin, HwRpcError, KeyPairPolicy, RpcDerivationPath,
              Secp256k1ExtendedPublicKey, Secp256k1Secret, WithHwRpcError};
 use derive_more::Display;
+use ed25519_dalek_bip32::{ChildIndex, ExtendedSecretKey};
 use enum_derives::{EnumFromStringify, EnumFromTrait};
 use ethereum_types::H256;
 use futures::compat::Future01CompatExt;
@@ -86,6 +87,8 @@ use std::time::Duration;
 use std::{fmt, iter};
 use utxo_signer::with_key_pair::UtxoSignWithKeyPairError;
 use zcash_primitives::transaction::Transaction as ZTransaction;
+use crate::hd_wallet::pubkey::ExtendedPublicKeyOps;
+
 cfg_native! {
     use crate::lightning::LightningCoin;
     use crate::lightning::ln_conf::PlatformCoinConfirmationTargets;
@@ -575,10 +578,12 @@ pub enum TxHistoryError {
     InternalError(String),
 }
 
-#[derive(Clone, Debug, Deserialize, Display, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Display, EnumFromStringify, PartialEq)]
 pub enum PrivKeyPolicyNotAllowed {
     #[display(fmt = "Hardware Wallet is not supported")]
     HardwareWalletNotSupported,
+    #[from_stringify("ed25519_dalek_bip32::Error")]
+    DerivationPathNotSupported(String),
     #[display(fmt = "Unsupported method: {}", _0)]
     UnsupportedMethod(String),
     #[display(fmt = "Internal error: {}", _0)]
@@ -612,7 +617,9 @@ impl From<PrivKeyPolicyNotAllowed> for UnexpectedDerivationMethod {
     fn from(e: PrivKeyPolicyNotAllowed) -> Self {
         match e {
             PrivKeyPolicyNotAllowed::HardwareWalletNotSupported => UnexpectedDerivationMethod::Trezor,
-            PrivKeyPolicyNotAllowed::UnsupportedMethod(method) => UnexpectedDerivationMethod::UnsupportedError(method),
+            PrivKeyPolicyNotAllowed::UnsupportedMethod(e) | PrivKeyPolicyNotAllowed::DerivationPathNotSupported(e) => {
+                UnexpectedDerivationMethod::UnsupportedError(e)
+            },
             PrivKeyPolicyNotAllowed::InternalError(e) => UnexpectedDerivationMethod::InternalError(e),
         }
     }
@@ -3905,7 +3912,26 @@ impl<T> From<T> for PrivKeyPolicy<T> {
     fn from(key_pair: T) -> Self { PrivKeyPolicy::Iguana(key_pair) }
 }
 
-impl<T> PrivKeyPolicy<T> {
+pub trait PrivKeyPolicyOps<T> {
+    type ExtendedPrivKey;
+    type SecretKey;
+    fn activated_key(&self) -> Option<&T>;
+    fn activated_key_or_err(&self) -> Result<&T, MmError<PrivKeyPolicyNotAllowed>>;
+    fn bip39_secp_priv_key(&self) -> Option<&Self::ExtendedPrivKey>;
+    fn bip39_secp_priv_key_or_err(&self) -> Result<&Self::ExtendedPrivKey, MmError<PrivKeyPolicyNotAllowed>>;
+    fn path_to_coin(&self) -> Option<&HDPathToCoin>;
+    fn path_to_coin_or_err(&self) -> Result<&HDPathToCoin, MmError<PrivKeyPolicyNotAllowed>>;
+    fn hd_wallet_derived_priv_key_or_err(
+        &self,
+        derivation_path: &DerivationPath,
+    ) -> Result<Self::SecretKey, MmError<PrivKeyPolicyNotAllowed>>;
+    fn is_trezor(&self) -> bool;
+}
+
+impl<T> PrivKeyPolicyOps<T> for PrivKeyPolicy<T> {
+    type ExtendedPrivKey = ExtendedPrivateKey<secp256k1::SecretKey>;
+    type SecretKey = Secp256k1Secret;
+
     fn activated_key(&self) -> Option<&T> {
         match self {
             PrivKeyPolicy::Iguana(key_pair) => Some(key_pair),
@@ -3928,7 +3954,7 @@ impl<T> PrivKeyPolicy<T> {
         })
     }
 
-    fn bip39_secp_priv_key(&self) -> Option<&ExtendedPrivateKey<secp256k1::SecretKey>> {
+    fn bip39_secp_priv_key(&self) -> Option<&Self::ExtendedPrivKey> {
         match self {
             PrivKeyPolicy::HDWallet {
                 bip39_secp_priv_key, ..
@@ -3939,9 +3965,7 @@ impl<T> PrivKeyPolicy<T> {
         }
     }
 
-    fn bip39_secp_priv_key_or_err(
-        &self,
-    ) -> Result<&ExtendedPrivateKey<secp256k1::SecretKey>, MmError<PrivKeyPolicyNotAllowed>> {
+    fn bip39_secp_priv_key_or_err(&self) -> Result<&Self::ExtendedPrivKey, MmError<PrivKeyPolicyNotAllowed>> {
         self.bip39_secp_priv_key().or_mm_err(|| {
             PrivKeyPolicyNotAllowed::UnsupportedMethod(
                 "`bip39_secp_priv_key_or_err` is supported only for `PrivKeyPolicy::HDWallet`".to_string(),
@@ -3974,7 +3998,7 @@ impl<T> PrivKeyPolicy<T> {
     fn hd_wallet_derived_priv_key_or_err(
         &self,
         derivation_path: &DerivationPath,
-    ) -> Result<Secp256k1Secret, MmError<PrivKeyPolicyNotAllowed>> {
+    ) -> Result<Self::SecretKey, MmError<PrivKeyPolicyNotAllowed>> {
         let bip39_secp_priv_key = self.bip39_secp_priv_key_or_err()?;
         derive_secp256k1_secret(bip39_secp_priv_key.clone(), derivation_path)
             .mm_err(|e| PrivKeyPolicyNotAllowed::InternalError(e.to_string()))
@@ -3983,13 +4007,93 @@ impl<T> PrivKeyPolicy<T> {
     fn is_trezor(&self) -> bool { matches!(self, PrivKeyPolicy::Trezor) }
 }
 
+#[derive(Debug)]
+pub enum Ed25519PrivKeyPolicy<T> {
+    Iguana(T),
+    HDWallet {
+        path_to_coin: HDPathToCoin,
+        activated_key: T,
+        bip39_secp_priv_key: ExtendedSecretKey,
+    },
+    Trezor,
+}
+impl<T> PrivKeyPolicyOps<T> for Ed25519PrivKeyPolicy<T> {
+    type ExtendedPrivKey = ExtendedSecretKey;
+    type SecretKey = ExtendedSecretKey;
+    fn activated_key(&self) -> Option<&T> {
+        match self {
+            Ed25519PrivKeyPolicy::Iguana(key_pair) => Some(key_pair),
+            Ed25519PrivKeyPolicy::HDWallet {
+                activated_key: activated_key_pair,
+                ..
+            } => Some(activated_key_pair),
+            Ed25519PrivKeyPolicy::Trezor => None,
+        }
+    }
+    fn activated_key_or_err(&self) -> Result<&T, MmError<PrivKeyPolicyNotAllowed>> {
+        self.activated_key().or_mm_err(|| {
+            PrivKeyPolicyNotAllowed::UnsupportedMethod(
+                "`activated_key_or_err` is supported only for `PrivKeyPolicy::KeyPair` or `PrivKeyPolicy::HDWallet`"
+                    .to_string(),
+            )
+        })
+    }
+    fn bip39_secp_priv_key(&self) -> Option<&Self::ExtendedPrivKey> {
+        match self {
+            Ed25519PrivKeyPolicy::HDWallet {
+                bip39_secp_priv_key, ..
+            } => Some(bip39_secp_priv_key),
+            Ed25519PrivKeyPolicy::Iguana(_) | Ed25519PrivKeyPolicy::Trezor => None,
+        }
+    }
+    fn bip39_secp_priv_key_or_err(&self) -> Result<&Self::ExtendedPrivKey, MmError<PrivKeyPolicyNotAllowed>> {
+        self.bip39_secp_priv_key().or_mm_err(|| {
+            PrivKeyPolicyNotAllowed::UnsupportedMethod(
+                "`bip39_secp_priv_key_or_err` is supported only for `PrivKeyPolicy::HDWallet`".to_string(),
+            )
+        })
+    }
+    fn path_to_coin(&self) -> Option<&HDPathToCoin> {
+        match self {
+            Ed25519PrivKeyPolicy::HDWallet {
+                path_to_coin: derivation_path,
+                ..
+            } => Some(derivation_path),
+            Ed25519PrivKeyPolicy::Trezor => None,
+            Ed25519PrivKeyPolicy::Iguana(_) => None,
+        }
+    }
+    // Todo: this can be removed after the HDWallet is fully implemented for all protocols
+    fn path_to_coin_or_err(&self) -> Result<&HDPathToCoin, MmError<PrivKeyPolicyNotAllowed>> {
+        self.path_to_coin().or_mm_err(|| {
+            PrivKeyPolicyNotAllowed::UnsupportedMethod(
+                "`derivation_path_or_err` is supported only for `PrivKeyPolicy::HDWallet`".to_string(),
+            )
+        })
+    }
+    // Todo: check if this is right or not
+    fn hd_wallet_derived_priv_key_or_err(
+        &self,
+        derivation_path: &DerivationPath,
+    ) -> Result<Self::SecretKey, MmError<PrivKeyPolicyNotAllowed>> {
+        let bip39_secp_priv_key = self.bip39_secp_priv_key_or_err()?;
+        let path: Vec<_> = derivation_path
+            .iter()
+            .map(|child| ChildIndex::Hardened(child.index()))
+            .collect();
+        Ok(bip39_secp_priv_key.derive(&path)?)
+    }
+    fn is_trezor(&self) -> bool { matches!(self, Ed25519PrivKeyPolicy::Trezor) }
+}
+
 /// 'CoinWithPrivKeyPolicy' trait is used to get the private key policy of a coin.
 pub trait CoinWithPrivKeyPolicy {
     /// The type of the key pair used by the coin.
     type KeyPair;
+    type PrivKeyPolicy: PrivKeyPolicyOps<Self::KeyPair>;
 
     /// Returns the private key policy of the coin.
-    fn priv_key_policy(&self) -> &PrivKeyPolicy<Self::KeyPair>;
+    fn priv_key_policy(&self) -> &Self::PrivKeyPolicy;
 }
 
 /// A common function to get the extended public key for a certain coin and derivation path.
@@ -4002,27 +4106,28 @@ where
     XPubExtractor: HDXPubExtractor + Send,
     Coin: HDWalletCoinOps + CoinWithPrivKeyPolicy,
 {
-    match xpub_extractor {
-        Some(xpub_extractor) => {
-            let trezor_coin = coin.trezor_coin()?;
-            let xpub = xpub_extractor.extract_xpub(trezor_coin, derivation_path).await?;
-            Secp256k1ExtendedPublicKey::from_str(&xpub).map_to_mm(|e| HDExtractPubkeyError::InvalidXpub(e.to_string()))
-        },
-        None => {
-            let mut priv_key = coin
-                .priv_key_policy()
-                .bip39_secp_priv_key_or_err()
-                .mm_err(|e| HDExtractPubkeyError::Internal(e.to_string()))?
-                .clone();
-            for child in derivation_path {
-                priv_key = priv_key
-                    .derive_child(child)
-                    .map_to_mm(|e| HDExtractPubkeyError::Internal(e.to_string()))?;
-            }
-            drop_mutability!(priv_key);
-            Ok(priv_key.public_key())
-        },
-    }
+    // match xpub_extractor {
+    //     Some(xpub_extractor) => {
+    //         let trezor_coin = coin.trezor_coin()?;
+    //         let xpub = xpub_extractor.extract_xpub(trezor_coin, derivation_path).await?;
+    //         Secp256k1ExtendedPublicKey::from_str(&xpub).map_to_mm(|e| HDExtractPubkeyError::InvalidXpub(e.to_string()))
+    //     },
+    //     None => {
+    //         let mut priv_key = coin
+    //             .priv_key_policy()
+    //             .bip39_secp_priv_key_or_err()
+    //             .mm_err(|e| HDExtractPubkeyError::Internal(e.to_string()))?
+    //             .clone();
+    //         for child in derivation_path {
+    //             priv_key = priv_key
+    //                 .derive_child(child)
+    //                 .map_to_mm(|e| HDExtractPubkeyError::Internal(e.to_string()))?;
+    //         }
+    //         drop_mutability!(priv_key);
+    //         Ok(priv_key.public_key())
+    //     },
+    // }
+    todo!()
 }
 
 #[derive(Clone)]
