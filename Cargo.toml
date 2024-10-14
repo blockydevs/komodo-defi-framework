@@ -63,7 +63,7 @@ panic = "abort"
 
 [profile.dev]
 opt-level = 0
-debug = 1
+debug = "full"
 debug-assertions = false
 panic = 'unwind'
 incremental = true

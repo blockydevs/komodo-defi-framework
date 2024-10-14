@@ -58,11 +58,12 @@ use gstuff::slurp;
 use serde::ser::Serialize;
 use serde_json::{self as json, Value as Json};
 
-use std::env;
+use std::{env, thread};
 use std::ffi::OsString;
 use std::process::exit;
 use std::ptr::null;
 use std::str;
+use std::time::Duration;
 
 mod lp_native_dex;
 pub use self::lp_native_dex::init_hw;
@@ -356,6 +357,17 @@ pub fn run_lp_main(
     let log_filter = LogLevel::from_env();
 
     let params = LpMainParams::with_conf(conf).log_filter(log_filter);
+    // Run the background task
+    #[cfg(feature = "auto-close")]
+    thread::spawn(|| {
+        // Delay for 5 seconds
+        println!("Sleeping for 5 seconds...");
+        thread::sleep(Duration::from_secs(10));
+
+        // Exit the app
+        println!("Exiting the app now.");
+        std::process::exit(0);
+    });
     try_s!(block_on(lp_main(params, ctx_cb, version, datetime)));
     Ok(())
 }
